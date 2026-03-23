@@ -1,0 +1,39 @@
+{
+  "name": "the-foundry",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "npm@10.5.2",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "test:ci": "turbo test -- --run --passWithNoTests",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
+    "db:generate": "npm run generate -w packages/db",
+    "db:push": "npm run push -w packages/db",
+    "db:migrate": "npm run migrate -w packages/db",
+    "db:studio": "npm run studio -w packages/db",
+    "worker:dev": "npm run dev -w services/worker",
+    "clean": "turbo clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.0",
+    "prettier": "^3.4.0",
+    "eslint": "^9.16.0",
+    "typescript-eslint": "^8.18.0",
+    "@typescript-eslint/eslint-plugin": "^8.18.0",
+    "@typescript-eslint/parser": "^8.18.0",
+    "eslint-config-next": "^15.1.0",
+    "eslint-plugin-import": "^2.31.0",
+    "eslint-config-prettier": "^9.1.0"
+  }
+}

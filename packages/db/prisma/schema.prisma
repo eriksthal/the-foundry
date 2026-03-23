@@ -1,0 +1,123 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ──────────────────────────────────────────────
+
+enum TaskStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
+enum MemoryCategory {
+  PATTERN
+  MISTAKE
+  CONVENTION
+  GOTCHA
+}
+
+enum MemorySource {
+  HUMAN_FEEDBACK
+  AUTO_DETECTED
+  MANUAL
+}
+
+// ─── Models ─────────────────────────────────────────────
+
+model Project {
+  id            String   @id @default(uuid())
+  name          String
+  description   String?
+  repoUrl       String   @map("repo_url")
+  defaultBranch String   @default("main") @map("default_branch")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  tasks         Task[]
+  memories      ProjectMemory[]
+
+  @@map("projects")
+}
+
+model Task {
+  id          String     @id @default(uuid())
+  projectId   String     @map("project_id")
+  title       String
+  description String
+  status      TaskStatus @default(DRAFT)
+  branch      String?
+  prUrl       String?    @map("pr_url")
+  result      String?
+  errorLog    String?    @map("error_log")
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+  startedAt   DateTime?  @map("started_at")
+  completedAt DateTime?  @map("completed_at")
+
+  project     Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  logs        ExecutionLog[]
+  feedback    TaskFeedback[]
+
+  @@index([status])
+  @@index([projectId])
+  @@map("tasks")
+}
+
+model ExecutionLog {
+  id        String   @id @default(uuid())
+  taskId    String   @map("task_id")
+  event     String
+  toolName  String?  @map("tool_name")
+  toolArgs  Json?    @map("tool_args")
+  result    String?
+  timestamp DateTime @default(now())
+
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@map("execution_logs")
+}
+
+model ProjectMemory {
+  id              String         @id @default(uuid())
+  projectId       String         @map("project_id")
+  category        MemoryCategory
+  content         String
+  source          MemorySource
+  taskId          String?        @map("task_id")
+  confidence      Float          @default(1.0)
+  timesReinforced Int            @default(1) @map("times_reinforced")
+  isActive        Boolean        @default(true) @map("is_active")
+  lastUsedAt      DateTime?      @map("last_used_at")
+  expiresAt       DateTime?      @map("expires_at")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+
+  project         Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, isActive])
+  @@map("project_memory")
+}
+
+model TaskFeedback {
+  id            String   @id @default(uuid())
+  taskId        String   @map("task_id")
+  rating        Int
+  whatWentWrong  String?  @map("what_went_wrong")
+  whatWentRight  String?  @map("what_went_right")
+  lessonsLearned String?  @map("lessons_learned")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  task          Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@map("task_feedback")
+}
