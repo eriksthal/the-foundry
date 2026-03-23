@@ -1,0 +1,37 @@
+{
+  "name": "the-foundry",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n web,worker -c blue,green \"npm run dev:web\" \"npm run dev:worker\"",
+    "dev:web": "npm run dev --workspace @the-foundry/web",
+    "dev:worker": "npm run dev --workspace @the-foundry/worker",
+    "lint": "eslint \"{apps,packages}/**/src/**/*.ts\" --max-warnings=0",
+    "prestart:web": "npm run build --workspace @the-foundry/shared",
+    "start:web": "npm run dev --workspace @the-foundry/web",
+    "prestart:worker": "npm run build --workspace @the-foundry/shared",
+    "start:worker": "npm run dev --workspace @the-foundry/worker",
+    "prestart": "npm run build --workspace @the-foundry/shared",
+    "start": "concurrently -k -n web,worker -c blue,green \"npm run dev --workspace @the-foundry/web\" \"npm run dev --workspace @the-foundry/worker\"",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspace @the-foundry/shared && npm run typecheck --workspace @the-foundry/web && npm run typecheck --workspace @the-foundry/worker",
+    "test": "npm run test --workspaces --if-present && npm run test:integration --if-present",
+    "test:integration": "npm run test:integration --workspace @the-foundry/web --if-present",
+    "coverage": "c8 --all --reporter=text-summary --reporter=lcov --reporter=json-summary --check-coverage --lines 80 --functions 80 --branches 80 --statements 80 --include=packages/shared/src/task-lifecycle.ts --include=apps/worker/src/polling-worker.ts --include=apps/worker/src/steps/**/*.ts --include=apps/worker/src/adapters/**/*.ts npm run test",
+    "ci": "npm run lint && npm run typecheck && npm run test && npm run coverage && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.23.0",
+    "c8": "^10.1.3",
+    "concurrently": "^9.2.1",
+    "eslint": "^9.23.0",
+    "globals": "^16.0.0",
+    "tsx": "^4.20.6",
+    "typescript-eslint": "^8.28.0",
+    "typescript": "^5.9.3"
+  }
+}

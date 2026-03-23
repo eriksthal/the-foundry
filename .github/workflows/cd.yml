@@ -1,0 +1,215 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Gate On Successful Main CI
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.eval.outputs.should_run }}
+    steps:
+      - name: Evaluate trigger conditions
+        id: eval
+        shell: bash
+        run: |
+          should_run="false"
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            should_run="true"
+            echo "Manual dispatch: CD allowed."
+          elif [[ "${{ github.event_name }}" == "workflow_run" ]] \
+            && [[ "${{ github.event.workflow_run.conclusion }}" == "success" ]] \
+            && [[ "${{ github.event.workflow_run.head_branch }}" == "main" ]]; then
+            should_run="true"
+            echo "CI workflow_run succeeded on main: CD allowed."
+          else
+            echo "Trigger did not match successful CI on main; CD will be skipped."
+            echo "event_name=${{ github.event_name }}"
+            echo "workflow_conclusion=${{ github.event.workflow_run.conclusion || 'n/a' }}"
+            echo "workflow_head_branch=${{ github.event.workflow_run.head_branch || 'n/a' }}"
+          fi
+
+          echo "should_run=$should_run" >> "$GITHUB_OUTPUT"
+
+  prepare:
+    name: Build And Decide Path
+    needs:
+      - gate
+    if: needs.gate.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_ready: ${{ steps.detect.outputs.deploy_ready }}
+      artifact_version: ${{ steps.version.outputs.artifact_version }}
+      artifact_name: ${{ steps.version.outputs.artifact_name }}
+      path_reason: ${{ steps.detect.outputs.path_reason }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Compute versioned artifact name
+        id: version
+        shell: bash
+        run: |
+          app_version="$(node -p "require('./package.json').version")"
+          short_sha="${GITHUB_SHA::7}"
+          artifact_version="v${app_version}+run${GITHUB_RUN_NUMBER}.${short_sha}"
+          artifact_name="foundry-${artifact_version}"
+
+          echo "artifact_version=$artifact_version" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+          echo "Artifact version: $artifact_version"
+          echo "Artifact name: $artifact_name"
+
+      - name: Detect deploy configuration safely
+        id: detect
+        shell: bash
+        env:
+          DEPLOY_TOKEN: ${{ secrets[format('{0}', 'DEPLOY_TOKEN')] }}
+        run: |
+          has_config="false"
+          has_secret="false"
+          deploy_ready="false"
+          path_reason="artifact-fallback"
+
+          if [[ -f ".github/deploy.yml" || -f "deploy/config.yml" ]]; then
+            has_config="true"
+          fi
+
+          if [[ -n "$DEPLOY_TOKEN" ]]; then
+            has_secret="true"
+          fi
+
+          if [[ "$has_config" == "true" && "$has_secret" == "true" ]]; then
+            deploy_ready="true"
+            path_reason="deploy-config-and-secret-present"
+          else
+            path_reason="artifact-fallback"
+          fi
+
+          echo "deploy_ready=$deploy_ready" >> "$GITHUB_OUTPUT"
+          echo "path_reason=$path_reason" >> "$GITHUB_OUTPUT"
+
+          echo "Deploy config present: $has_config"
+          echo "Deploy secret present: $has_secret"
+          echo "Selected path: $path_reason"
+
+  deploy:
+    name: Deploy
+    needs:
+      - prepare
+    if: needs.prepare.outputs.deploy_ready == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Execute deploy placeholder command
+        env:
+          DEPLOY_TOKEN: ${{ secrets[format('{0}', 'DEPLOY_TOKEN')] }}
+        shell: bash
+        run: |
+          echo "Deploy path selected: ${{ needs.prepare.outputs.path_reason }}"
+          echo "Running deploy placeholder command."
+          npm run deploy --if-present
+
+  publish-artifact:
+    name: Publish Artifact Fallback
+    needs:
+      - prepare
+    if: needs.prepare.outputs.deploy_ready == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Package build artifacts and metadata
+        id: package
+        shell: bash
+        run: |
+          artifact_name="${{ needs.prepare.outputs.artifact_name }}"
+          artifact_version="${{ needs.prepare.outputs.artifact_version }}"
+
+          mkdir -p out
+
+          mapfile -t dist_paths < <(find apps packages -type d -name dist | sort)
+          include_paths=("package.json" "package-lock.json" "migrations")
+
+          for p in "${dist_paths[@]}"; do
+            include_paths+=("$p")
+          done
+
+          tar -czf "out/${artifact_name}.tar.gz" "${include_paths[@]}"
+
+          cat > "out/${artifact_name}.metadata.json" <<EOF
+          {
+            "artifactName": "${artifact_name}",
+            "artifactVersion": "${artifact_version}",
+            "sourceSha": "${GITHUB_SHA}",
+            "runId": "${GITHUB_RUN_ID}",
+            "runNumber": "${GITHUB_RUN_NUMBER}",
+            "workflow": "${GITHUB_WORKFLOW}",
+            "pathReason": "${{ needs.prepare.outputs.path_reason }}",
+            "createdAtUtc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+          echo "artifact_name=${artifact_name}" >> "$GITHUB_OUTPUT"
+          echo "Packaged fallback artifact: out/${artifact_name}.tar.gz"
+          echo "Generated metadata: out/${artifact_name}.metadata.json"
+
+      - name: Upload fallback artifact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: out/
+          if-no-files-found: error

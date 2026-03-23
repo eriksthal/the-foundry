@@ -1,0 +1,512 @@
+[
+  {
+    "id": "T001",
+    "type": "scaffold",
+    "priority": "critical",
+    "title": "Initialize monorepo apps and shared package",
+    "description": "Create the repository structure with apps/web, apps/worker, and packages/shared, including package manifests and runnable dev scripts.",
+    "acceptance_criteria": [
+      "Directories apps/web, apps/worker, and packages/shared exist.",
+      "Root package scripts can start web and worker processes.",
+      "A fresh clone can run install and start commands without missing workspace errors."
+    ],
+    "constraints": [
+      "Keep all code in one repository.",
+      "Do not add queue or microservice infrastructure.",
+      "Use Node.js and TypeScript for runtime code."
+    ]
+  },
+  {
+    "id": "T002",
+    "type": "documentation",
+    "priority": "critical",
+    "title": "Add coding standards document",
+    "description": "Create docs/coding-standards.md defining naming conventions, folder boundaries, error handling rules, testing expectations, and PR checklist requirements.",
+    "acceptance_criteria": [
+      "File docs/coding-standards.md exists.",
+      "Document includes sections for naming, architecture boundaries, testing, linting, and type safety.",
+      "PR checklist section contains verifiable quality checks before merge."
+    ],
+    "constraints": [
+      "Document must be specific to this repository structure.",
+      "Rules must be testable or reviewable.",
+      "Do not include non-actionable policy language."
+    ]
+  },
+  {
+    "id": "T003",
+    "type": "documentation",
+    "priority": "high",
+    "title": "Add LLM adapter contract document",
+    "description": "Create docs/agent-contracts.md specifying that all LLM calls must route through Codex/Copilot adapters and defining allowed context payload structure.",
+    "acceptance_criteria": [
+      "File docs/agent-contracts.md exists.",
+      "Document explicitly forbids direct provider SDK calls outside adapter modules.",
+      "Document defines required request and response schema fields for adapter calls."
+    ],
+    "constraints": [
+      "Allowed providers are only codex and copilot.",
+      "Contract must enforce small structured context.",
+      "Keep scope to implementation requirements only."
+    ]
+  },
+  {
+    "id": "T004",
+    "type": "quality-tooling",
+    "priority": "critical",
+    "title": "Configure repository linting",
+    "description": "Add ESLint configuration and scripts so all workspace packages can be linted from root.",
+    "acceptance_criteria": [
+      "Root lint script runs lint checks across web, worker, and shared packages.",
+      "Lint command exits non-zero when violations exist.",
+      "CI can execute lint command non-interactively."
+    ],
+    "constraints": [
+      "One root lint entrypoint only.",
+      "No package-specific lint behavior that bypasses root command.",
+      "Configuration must support TypeScript code."
+    ]
+  },
+  {
+    "id": "T005",
+    "type": "quality-tooling",
+    "priority": "critical",
+    "title": "Enable strict TypeScript type checks",
+    "description": "Create shared strict TypeScript configuration and add a root typecheck script that fails on any compiler error.",
+    "acceptance_criteria": [
+      "tsconfig base config exists and is extended by each package.",
+      "Root typecheck script runs checks for all packages.",
+      "Typecheck command exits non-zero on any type error."
+    ],
+    "constraints": [
+      "Strict mode must be enabled.",
+      "No implicit any or skipped type checks in runtime packages.",
+      "Typecheck must run in CI without watch mode."
+    ]
+  },
+  {
+    "id": "T006",
+    "type": "database",
+    "priority": "critical",
+    "title": "Create Postgres migration for core workflow tables",
+    "description": "Add initial migration creating findings, tasks, runs, and artifacts tables with required keys and indexes.",
+    "acceptance_criteria": [
+      "Migration creates findings, tasks, runs, and artifacts tables.",
+      "Foreign keys enforce findings->tasks->runs->artifacts relationships.",
+      "Indexes exist for tasks(state) and runs(task_id)."
+    ],
+    "constraints": [
+      "Only four workflow tables in v1.",
+      "All workflow state must be stored in Postgres.",
+      "Migration must be idempotent through migration tool semantics."
+    ]
+  },
+  {
+    "id": "T007",
+    "type": "domain",
+    "priority": "critical",
+    "title": "Implement task lifecycle transition validator",
+    "description": "Create shared validation logic for task state transitions: awaiting_approval, approved, in_progress, done, failed, including manual retry path failed->approved.",
+    "acceptance_criteria": [
+      "Allowed transitions are accepted.",
+      "Disallowed transitions are rejected with deterministic errors.",
+      "Validator is imported by both API and worker modules."
+    ],
+    "constraints": [
+      "No state transitions outside validator.",
+      "Retry transition must be explicit and manual.",
+      "State set must remain limited to v1 lifecycle."
+    ]
+  },
+  {
+    "id": "T008",
+    "type": "api",
+    "priority": "critical",
+    "title": "Implement finding ingest API route",
+    "description": "Create API endpoint that stores a finding and creates one matching task in awaiting_approval within a single transaction.",
+    "acceptance_criteria": [
+      "Valid request inserts one finding row and one task row.",
+      "New task state is awaiting_approval.",
+      "Invalid payloads return validation errors without partial writes."
+    ],
+    "constraints": [
+      "Inline normalization only in v1.",
+      "Endpoint input must use strict schema validation.",
+      "Transaction rollback required on any failure."
+    ]
+  },
+  {
+    "id": "T009",
+    "type": "api",
+    "priority": "high",
+    "title": "Implement task list API route",
+    "description": "Create API endpoint to return task queue data including state and latest run summary with optional state filtering.",
+    "acceptance_criteria": [
+      "Response includes task id, title, state, and latest run summary fields.",
+      "State filter parameter returns only matching tasks.",
+      "Tasks are returned in deterministic sort order."
+    ],
+    "constraints": [
+      "Read-only endpoint.",
+      "Payload should be compact for UI consumption.",
+      "No pagination requirement for initial v1."
+    ]
+  },
+  {
+    "id": "T010",
+    "type": "api",
+    "priority": "critical",
+    "title": "Implement task approval and retry API route",
+    "description": "Create endpoint logic to transition awaiting_approval->approved and failed->approved using the shared transition validator.",
+    "acceptance_criteria": [
+      "Approving awaiting_approval task changes state to approved.",
+      "Retrying failed task changes state to approved.",
+      "Invalid source states return deterministic transition errors."
+    ],
+    "constraints": [
+      "No automatic approvals.",
+      "Must use shared transition validator.",
+      "State updates must be transactional."
+    ]
+  },
+  {
+    "id": "T011",
+    "type": "api",
+    "priority": "critical",
+    "title": "Implement worker claim API route",
+    "description": "Create endpoint that atomically claims one approved task, creates a run record, and sets task state to in_progress using row-level locking.",
+    "acceptance_criteria": [
+      "Concurrent requests cannot claim the same task.",
+      "Successful claim creates exactly one run row linked to the task.",
+      "When no approved tasks exist, endpoint returns an empty claim result."
+    ],
+    "constraints": [
+      "Use Postgres transaction with row-level lock semantics.",
+      "One task claim per call.",
+      "No external queue service."
+    ]
+  },
+  {
+    "id": "T012",
+    "type": "api",
+    "priority": "critical",
+    "title": "Implement run completion API route",
+    "description": "Create endpoint that records step outcomes, persists artifacts, and finalizes task state to done or failed.",
+    "acceptance_criteria": [
+      "Run row receives final state and ended_at timestamp.",
+      "Task is marked done only when CI and review both pass.",
+      "Task is marked failed with stored failure_reason on any failure path."
+    ],
+    "constraints": [
+      "Use transactional updates.",
+      "Apply transition validation before final task update.",
+      "Artifacts must be written to Postgres."
+    ]
+  },
+  {
+    "id": "T013",
+    "type": "llm-adapter",
+    "priority": "critical",
+    "title": "Implement shared LLM provider interface",
+    "description": "Create a provider abstraction that defines one request schema and one response schema for all model calls.",
+    "acceptance_criteria": [
+      "Provider interface module is imported by execute and review steps.",
+      "Request schema includes model provider, prompt payload, timeout, and token limits.",
+      "Response schema includes success/failure, output, and usage metadata fields."
+    ],
+    "constraints": [
+      "Interface must be provider-agnostic.",
+      "Payload must remain structured and bounded.",
+      "No direct provider-specific code in worker step modules."
+    ]
+  },
+  {
+    "id": "T014",
+    "type": "llm-adapter",
+    "priority": "critical",
+    "title": "Implement Codex adapter",
+    "description": "Implement the Codex adapter conforming to the shared provider interface and enforce timeout/token guardrails.",
+    "acceptance_criteria": [
+      "Adapter compiles and satisfies provider interface contract.",
+      "Adapter returns normalized success and error payloads.",
+      "Timeout and token guardrails are enforced per call."
+    ],
+    "constraints": [
+      "Adapter must be callable only through provider interface.",
+      "No fallback to other providers inside adapter.",
+      "Do not expose provider secrets in logs/artifacts."
+    ]
+  },
+  {
+    "id": "T015",
+    "type": "llm-adapter",
+    "priority": "critical",
+    "title": "Implement Copilot adapter",
+    "description": "Implement the Copilot adapter conforming to the shared provider interface and enforce timeout/token guardrails.",
+    "acceptance_criteria": [
+      "Adapter compiles and satisfies provider interface contract.",
+      "Adapter returns normalized success and error payloads.",
+      "Timeout and token guardrails are enforced per call."
+    ],
+    "constraints": [
+      "Adapter must be callable only through provider interface.",
+      "No fallback to other providers inside adapter.",
+      "Do not expose provider secrets in logs/artifacts."
+    ]
+  },
+  {
+    "id": "T016",
+    "type": "worker",
+    "priority": "critical",
+    "title": "Implement polling worker loop",
+    "description": "Build worker main loop that polls claim endpoint at fixed interval and processes one task at a time through execute, ci, and review steps.",
+    "acceptance_criteria": [
+      "Worker polls on fixed schedule and does not crash on empty queue.",
+      "Worker processes at most one claimed task concurrently.",
+      "Worker always submits run completion with success or failure."
+    ],
+    "constraints": [
+      "Polling architecture only.",
+      "No parallel task execution in v1.",
+      "Hard runtime timeout per run is enforced."
+    ]
+  },
+  {
+    "id": "T017",
+    "type": "worker-step",
+    "priority": "high",
+    "title": "Implement execution step wrapper",
+    "description": "Create execution step that assembles task-scoped context, invokes selected provider adapter, and writes execution artifacts.",
+    "acceptance_criteria": [
+      "Execution step sends only task-scoped structured context.",
+      "Step writes prompt summary and response summary artifacts.",
+      "Step returns deterministic success/failure object to worker loop."
+    ],
+    "constraints": [
+      "No full-repo context payloads.",
+      "Calls must go through provider interface only.",
+      "Stored artifact size must be bounded."
+    ]
+  },
+  {
+    "id": "T018",
+    "type": "worker-step",
+    "priority": "high",
+    "title": "Implement CI command step wrapper",
+    "description": "Create CI step that executes configured quality/build command, captures exit code, and stores truncated log artifact.",
+    "acceptance_criteria": [
+      "Step returns pass/fail based on process exit code.",
+      "Step stores CI log tail artifact for debugging.",
+      "Step surfaces timeout errors as failed result."
+    ],
+    "constraints": [
+      "Single configured CI command for v1.",
+      "Local command execution only.",
+      "Log capture must have maximum size limit."
+    ]
+  },
+  {
+    "id": "T019",
+    "type": "worker-step",
+    "priority": "high",
+    "title": "Implement review step wrapper",
+    "description": "Create review step that sends change summary and CI summary to selected adapter and produces pass/fail rationale artifact.",
+    "acceptance_criteria": [
+      "Review step input includes structured change and CI summaries.",
+      "Step output includes boolean pass flag and textual rationale.",
+      "Review result artifact is persisted for every run."
+    ],
+    "constraints": [
+      "Review call must use provider interface only.",
+      "Review cannot mark done when CI failed.",
+      "Prompt context must remain compact and structured."
+    ]
+  },
+  {
+    "id": "T020",
+    "type": "testing",
+    "priority": "critical",
+    "title": "Add unit tests for state machine and adapters",
+    "description": "Implement unit tests validating transition rules and provider adapter contract behavior including error normalization.",
+    "acceptance_criteria": [
+      "All allowed and disallowed transitions are covered by tests.",
+      "Provider interface contract tests run for both Codex and Copilot adapters.",
+      "Unit tests run in CI and fail on assertion errors."
+    ],
+    "constraints": [
+      "Tests must be deterministic.",
+      "No external network dependency in unit tests.",
+      "Adapter tests may use mocks for provider responses."
+    ]
+  },
+  {
+    "id": "T021",
+    "type": "testing",
+    "priority": "critical",
+    "title": "Add integration tests for API transitions and claim locking",
+    "description": "Implement integration tests covering finding ingest, approval/retry transitions, run completion logic, and concurrent claim safety.",
+    "acceptance_criteria": [
+      "Tests verify ingest creates finding and task in one flow.",
+      "Tests verify invalid state transitions are rejected.",
+      "Concurrent claim test proves a task can only be claimed once."
+    ],
+    "constraints": [
+      "Use test Postgres database.",
+      "Tests must run non-interactively in CI.",
+      "Reset database state between test cases."
+    ]
+  },
+  {
+    "id": "T022",
+    "type": "testing",
+    "priority": "critical",
+    "title": "Add end-to-end lifecycle tests",
+    "description": "Implement end-to-end tests for one successful run path and one failure path through full task lifecycle.",
+    "acceptance_criteria": [
+      "Success scenario ends with task state done.",
+      "Failure scenario ends with task state failed and reason stored.",
+      "Both scenarios verify artifacts are persisted."
+    ],
+    "constraints": [
+      "Use deterministic stubs for external provider calls.",
+      "Scenarios must run in CI runtime budget.",
+      "No manual test steps allowed."
+    ]
+  },
+  {
+    "id": "T023",
+    "type": "testing",
+    "priority": "high",
+    "title": "Enforce coverage threshold for critical modules",
+    "description": "Configure test coverage checks for state machine, worker orchestration, and LLM adapter modules.",
+    "acceptance_criteria": [
+      "Coverage report is generated in CI.",
+      "CI fails when configured threshold is not met.",
+      "Coverage includes state machine, worker steps, and adapter modules."
+    ],
+    "constraints": [
+      "Threshold must be explicit in config.",
+      "Coverage checks must run in same CI pipeline as tests.",
+      "Do not block on non-critical modules in v1."
+    ]
+  },
+  {
+    "id": "T024",
+    "type": "ci",
+    "priority": "critical",
+    "title": "Create CI workflow with quality gates",
+    "description": "Add CI workflow to run install, lint, typecheck, unit tests, integration tests, and build on pull requests and pushes to main.",
+    "acceptance_criteria": [
+      "Workflow triggers on pull_request and push to main.",
+      "Workflow executes lint, typecheck, test, and build jobs.",
+      "Workflow returns failed status if any quality gate fails."
+    ],
+    "constraints": [
+      "Use one canonical CI workflow file for v1.",
+      "Workflow must run without interactive prompts.",
+      "Commands must map to root package scripts."
+    ]
+  },
+  {
+    "id": "T025",
+    "type": "ci",
+    "priority": "high",
+    "title": "Enforce required status checks for merges",
+    "description": "Configure repository branch protection so main cannot be merged unless CI quality checks pass.",
+    "acceptance_criteria": [
+      "Main branch requires CI status checks before merge.",
+      "Merge is blocked when lint/typecheck/tests/build fail.",
+      "Configuration is documented in repository setup instructions."
+    ],
+    "constraints": [
+      "Protect main branch only for v1.",
+      "No bypass rules for standard contributors.",
+      "Status check names must match workflow outputs."
+    ]
+  },
+  {
+    "id": "T026",
+    "type": "cd",
+    "priority": "high",
+    "title": "Create CD workflow with auto-deploy and artifact fallback",
+    "description": "Add CD workflow that auto-deploys on main when deploy secrets and target config are present, otherwise publishes versioned build artifacts as release candidates.",
+    "acceptance_criteria": [
+      "Workflow runs after successful CI on main.",
+      "When deploy configuration exists, workflow executes deployment step.",
+      "When deploy configuration is absent, workflow publishes versioned artifacts and release metadata."
+    ],
+    "constraints": [
+      "Do not fail pipeline solely due to missing optional deploy target in v1.",
+      "Deployment and artifact paths must be mutually exclusive and explicit.",
+      "Secrets must never be printed to logs."
+    ]
+  },
+  {
+    "id": "T027",
+    "type": "ui",
+    "priority": "high",
+    "title": "Build task queue UI page",
+    "description": "Implement queue view listing tasks by lifecycle state with approve and retry actions wired to APIs.",
+    "acceptance_criteria": [
+      "Queue page shows task title, state, and latest run summary.",
+      "Approve action transitions awaiting_approval tasks.",
+      "Retry action transitions failed tasks to approved."
+    ],
+    "constraints": [
+      "Keep UI minimal and operational.",
+      "Use existing API contracts only.",
+      "No advanced analytics widgets in v1."
+    ]
+  },
+  {
+    "id": "T028",
+    "type": "ui",
+    "priority": "medium",
+    "title": "Build task detail UI page",
+    "description": "Implement detail page displaying run timeline summary, CI status, review status, provider used, and failure details.",
+    "acceptance_criteria": [
+      "Detail page shows latest run state and timestamps.",
+      "Page displays CI and review outcomes with provider name.",
+      "Failure reason and artifact summaries are visible for failed runs."
+    ],
+    "constraints": [
+      "Read-focused view with minimal controls.",
+      "Display compact artifact summaries only.",
+      "No extra workflow actions beyond approve/retry."
+    ]
+  },
+  {
+    "id": "T029",
+    "type": "quality-tooling",
+    "priority": "medium",
+    "title": "Add reproducible root quality scripts",
+    "description": "Define root scripts for lint, typecheck, test, build, and ci to ensure local and CI parity.",
+    "acceptance_criteria": [
+      "Root scripts lint, typecheck, test, build, and ci are present.",
+      "ci script executes quality gates in deterministic order.",
+      "Developer can run one command locally to mirror CI checks."
+    ],
+    "constraints": [
+      "Script names and behavior must be stable for CI usage.",
+      "No package-specific hidden prerequisites.",
+      "Commands must complete in non-interactive environments."
+    ]
+  },
+  {
+    "id": "T030",
+    "type": "documentation",
+    "priority": "medium",
+    "title": "Add failure triage and rollback runbook",
+    "description": "Create docs/runbook.md describing how to investigate failed runs, rerun tasks safely, handle flaky tests, and execute deployment rollback.",
+    "acceptance_criteria": [
+      "Runbook includes step-by-step triage for failed CI, failed review, and failed deploy.",
+      "Runbook includes explicit retry and rollback procedures.",
+      "Runbook references commands and file locations used by this repository."
+    ],
+    "constraints": [
+      "Procedures must map to implemented scripts/workflows.",
+      "No environment-specific assumptions without notes.",
+      "Keep instructions actionable and concise."
+    ]
+  }
+]

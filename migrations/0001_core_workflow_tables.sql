@@ -1,0 +1,39 @@
+-- T006 v1 workflow schema
+-- Idempotent at SQL level via IF NOT EXISTS and safe to run under
+-- normal migration-tool tracking semantics.
+
+CREATE TABLE IF NOT EXISTS findings (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  source_key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  detail TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+  state TEXT NOT NULL,
+  payload JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  finished_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  run_id BIGINT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  artifact_key TEXT NOT NULL,
+  location TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
+CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id);
