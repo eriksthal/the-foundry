@@ -50,6 +50,21 @@ export type OrchestratorResponse = {
   prUrl?: string;
 };
 
+const VALID_SCENARIOS = new Set<keyof typeof TaskScenario>(["SMALL", "MEDIUM", "COMPLEX"]);
+const VALID_ACTIONS = new Set<OrchestrationAction>(["COMPLETE", "AWAIT_PLAN_APPROVAL", "FAIL"]);
+const VALID_PHASES = new Set<keyof typeof TaskPhase>([
+  "CLASSIFY",
+  "PLAN",
+  "PLAN_DRAFT",
+  "WAITING_FOR_PLAN_APPROVAL",
+  "IMPLEMENT",
+  "REVIEW",
+  "REWORK",
+  "CREATE_PR",
+  "DONE",
+  "FAILED",
+]);
+
 export function buildInitialTaskPrompt(task: Task, branchName: string): string {
   return `${baseInstructions()}
 
@@ -77,7 +92,8 @@ ${task.description}
 4. Use subagents intentionally. The planner returns plans, implementers write code, reviewers gate quality.
 5. The worker handles push and PR creation after execution. Only include prUrl if you obtained a verified real URL from a tool result. Never invent or guess it.
 6. You may return COMPLETE only after real repository work has happened and implementation.filesChanged lists the actual changed files.
-7. Return only the required JSON payload.`;
+7. Do not invent new action names or state values. Use only the exact contract values listed below.
+8. Return only the required JSON payload.`;
 }
 
 export function buildResumePrompt(task: Task): string {
@@ -113,6 +129,18 @@ export function parseOrchestratorResponse(content: string): OrchestratorResponse
 
   if (!parsed.scenario || !parsed.action || !parsed.phase || !parsed.classification || !parsed.finalSummary) {
     throw new Error("Orchestrator response missing required fields");
+  }
+
+  if (!VALID_SCENARIOS.has(parsed.scenario)) {
+    throw new Error(`Invalid orchestrator scenario: ${String(parsed.scenario)}`);
+  }
+
+  if (!VALID_ACTIONS.has(parsed.action as OrchestrationAction)) {
+    throw new Error(`Invalid orchestrator action: ${String(parsed.action)}`);
+  }
+
+  if (!VALID_PHASES.has(parsed.phase)) {
+    throw new Error(`Invalid orchestrator phase: ${String(parsed.phase)}`);
   }
 
   return {
@@ -154,6 +182,7 @@ function baseInstructions(): string {
 - Never fabricate repository, branch, commit, or pull request URLs.
 - Never return COMPLETE if no files were changed.
 - Only COMPLEX tasks may return AWAIT_PLAN_APPROVAL.
+- Never invent intermediate actions such as PLAN. Planning is represented by the phase field, not the action field.
 - Scenario values: SMALL | MEDIUM | COMPLEX.
 - Action values:
   - COMPLETE: task execution finished successfully.

@@ -40,6 +40,25 @@ describe("parseOrchestratorResponse", () => {
       "Orchestrator response missing required fields",
     );
   });
+
+  it("throws on invalid action values", () => {
+    expect(() =>
+      parseOrchestratorResponse(`{
+        "version": 1,
+        "scenario": "MEDIUM",
+        "action": "PLAN",
+        "phase": "PLAN",
+        "classification": {
+          "size": "MEDIUM",
+          "reason": "reason",
+          "riskLevel": "medium",
+          "estimatedTracks": 1,
+          "needsHumanPlanApproval": false
+        },
+        "finalSummary": "summary"
+      }`),
+    ).toThrow("Invalid orchestrator action: PLAN");
+  });
 });
 
 describe("planApprovalStatusForScenario", () => {

@@ -527,6 +527,19 @@ async function applyOrchestrationResult(
     throw new Error(response.finalSummary);
   }
 
+  if (response.action !== "COMPLETE") {
+    await prisma.task.update({
+      where: { id: taskId },
+      data: {
+        ...updateData,
+        status: TaskStatus.FAILED,
+        phase: TaskPhase.FAILED,
+        errorLog: `Unsupported orchestrator action: ${response.action}`,
+      },
+    });
+    throw new Error(`Unsupported orchestrator action: ${response.action}`);
+  }
+
   if (response.review) {
     await createLog(taskId, {
       event: "review.completed",
@@ -952,7 +965,27 @@ async function executeTaskWithGuards(params: {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const response = await sendAndWaitWithSlidingTimeout(params.session, currentPrompt, params.task.id);
     const resultContent = response?.data?.content ?? "No response content";
-    const parsed = parseOrchestratorResponse(resultContent);
+    let parsed: OrchestratorResponse;
+
+    try {
+      parsed = parseOrchestratorResponse(resultContent);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      if (attempt === 0) {
+        evidenceFailureReason = message;
+        await createLog(params.task.id, {
+          event: "orchestration.invalid_response",
+          phase: TaskPhase.CLASSIFY,
+          result: message,
+          payload: { rawContent: resultContent.slice(0, 4000) },
+        });
+        currentPrompt = buildInvalidResponseRetryPrompt(message);
+        continue;
+      }
+
+      throw error;
+    }
 
     if (parsed.review?.verdict) {
       params.evidence.reviewCompleted = true;
@@ -1045,4 +1078,23 @@ Rules:
 - If you truly cannot proceed safely, return FAIL with the concrete blocker.
 
 Return only the required JSON payload.`;
+}
+
+function buildInvalidResponseRetryPrompt(reason: string): string {
+  return `${reason}
+
+Your previous response violated the orchestrator contract.
+
+You must correct it now and continue the task.
+
+Rules:
+- Valid actions are exactly: COMPLETE, AWAIT_PLAN_APPROVAL, FAIL.
+- Valid scenarios are exactly: SMALL, MEDIUM, COMPLEX.
+- Valid phases are exactly: CLASSIFY, PLAN, PLAN_DRAFT, WAITING_FOR_PLAN_APPROVAL, IMPLEMENT, REVIEW, REWORK, CREATE_PR, DONE, FAILED.
+- MEDIUM tasks must continue automatically without approval.
+- Only COMPLEX tasks may return AWAIT_PLAN_APPROVAL.
+- Do not invent intermediate action names like PLAN.
+- If work is not finished, continue execution instead of summarizing.
+
+Return only one valid JSON payload.`;
 }
