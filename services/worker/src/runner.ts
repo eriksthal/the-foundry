@@ -239,7 +239,9 @@ async function setupRepository(taskId: string, workDir: string): Promise<void> {
       await createLog(taskId, { event: "setup_error", result: message.slice(0, 2000) });
     }
 
-    if (pkg?.scripts?.build) {
+    const shouldRunSetupBuild = process.env.FOUNDRY_SETUP_RUN_BUILD?.trim().toLowerCase() === "true";
+
+    if (pkg?.scripts?.build && shouldRunSetupBuild) {
       try {
         const buildCmd = hasPnpm ? "pnpm run build" : hasYarn ? "yarn build" : "npm run build";
         console.info(`[runner] Detected build script; running: ${buildCmd}`);
@@ -256,6 +258,14 @@ async function setupRepository(taskId: string, workDir: string): Promise<void> {
         console.warn("[runner] Build failed:", message);
         await createLog(taskId, { event: "setup_error", result: message.slice(0, 2000) });
       }
+    } else if (pkg?.scripts?.build) {
+      console.info(
+        "[runner] Skipping automatic setup build. Set FOUNDRY_SETUP_RUN_BUILD=true to enable it.",
+      );
+      await createLog(taskId, {
+        event: "setup",
+        result: "build:skipped (set FOUNDRY_SETUP_RUN_BUILD=true to enable)",
+      });
     }
   } catch (e) {
     console.warn(

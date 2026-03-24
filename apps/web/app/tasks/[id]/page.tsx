@@ -1,6 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import {
+  type ExecutionLog,
   PlanApprovalStatus,
   prisma,
   TaskPhase,
@@ -102,6 +103,8 @@ export default async function TaskDetailPage({
   const plan = isPlan(task.planContent) ? task.planContent : null;
   const timelineLogs = task.logs.filter((log) => !log.event.startsWith("assistant.message_delta"));
   const pullRequest = task.prUrl ? await getPullRequestState(task.prUrl) : null;
+  const runSummary = buildRunSummary(timelineLogs, task);
+  const categorizedTimeline = categorizeLogs(timelineLogs);
 
   return (
     <div className="space-y-8">
@@ -247,26 +250,50 @@ export default async function TaskDetailPage({
         </div>
       )}
 
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {runSummary.map((item) => (
+          <InfoCard key={item.label} label={item.label} value={item.value} />
+        ))}
+      </div>
+
       {timelineLogs.length > 0 && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-5">
           <h2 className="mb-3 text-sm font-semibold text-zinc-400">
             Execution Timeline ({timelineLogs.length} events)
           </h2>
-          <div className="max-h-[32rem] space-y-2 overflow-y-auto">
-            {timelineLogs.map((log) => (
-              <div key={log.id} className="rounded border border-zinc-800 bg-zinc-950 p-3 text-xs">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-zinc-500">
-                    {new Date(log.timestamp).toLocaleTimeString()}
+          <div className="space-y-5">
+            {categorizedTimeline.map((section) => (
+              <div key={section.category} className="rounded border border-zinc-800 bg-zinc-950 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-medium text-zinc-100">{section.label}</h3>
+                    <p className="text-xs text-zinc-500">{section.description}</p>
+                  </div>
+                  <span className="rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-400">
+                    {section.logs.length} events
                   </span>
-                  <span className="font-mono text-zinc-200">{log.event}</span>
-                  {log.phase && <span className="text-orange-300">{log.phase}</span>}
-                  {log.agentName && <span className="text-cyan-300">{log.agentName}</span>}
-                  {log.toolName && <span className="text-blue-400">{log.toolName}</span>}
                 </div>
-                {log.result && (
-                  <p className="mt-2 whitespace-pre-wrap text-zinc-400">{log.result}</p>
-                )}
+
+                <div className="max-h-72 space-y-2 overflow-y-auto">
+                  {section.logs.map((log) => (
+                    <div key={log.id} className="rounded border border-zinc-800 bg-zinc-900 p-3 text-xs">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-zinc-500">
+                          {new Date(log.timestamp).toLocaleTimeString()}
+                        </span>
+                        <span className="font-mono text-zinc-200">{formatEventLabel(log)}</span>
+                        {log.phase && <span className="text-orange-300">{log.phase}</span>}
+                        {log.agentName && <span className="text-cyan-300">{log.agentName}</span>}
+                        {log.toolName && <span className="text-blue-400">{log.toolName}</span>}
+                      </div>
+                      {log.result && (
+                        <p className="mt-2 whitespace-pre-wrap text-zinc-400">
+                          {truncateLogResult(log.result)}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
@@ -323,4 +350,204 @@ type PlanShape = {
 
 function isPlan(value: unknown): value is PlanShape {
   return typeof value === "object" && value !== null && "summary" in value;
+}
+
+type TimelineSection = {
+  category: LogCategory;
+  label: string;
+  description: string;
+  logs: ExecutionLog[];
+};
+
+type LogCategory =
+  | "planning"
+  | "resume"
+  | "environment"
+  | "exploration"
+  | "implementation"
+  | "validation"
+  | "delivery"
+  | "problems"
+  | "other";
+
+function buildRunSummary(logs: ExecutionLog[], task: { status: string; prUrl: string | null }) {
+  const lastResumeEvent = [...logs]
+    .reverse()
+    .find((log) => ["plan.resume", "plan.resume_fallback", "plan.resume_failed"].includes(log.event));
+  const editEvents = logs.filter(
+    (log) =>
+      (log.event === "tool_call" || log.event === "tool_result") &&
+      ["write_file", "edit_file"].includes(log.toolName ?? ""),
+  );
+  const deliveryEvent = [...logs]
+    .reverse()
+    .find((log) => ["pr.synced", "pr.unavailable", "pr.skipped", "git.no_changes"].includes(log.event));
+  const reviewEvent = [...logs].reverse().find((log) => log.event === "review.completed");
+
+  return [
+    {
+      label: "Resume",
+      value: summarizeResume(lastResumeEvent),
+    },
+    {
+      label: "Code Changes",
+      value: editEvents.length > 0 ? `${editEvents.length} edit events recorded` : "No edit tools recorded",
+    },
+    {
+      label: "Review",
+      value: reviewEvent?.result ? truncateSingleLine(reviewEvent.result, 48) : "No review completion recorded",
+    },
+    {
+      label: "Delivery",
+      value: summarizeDelivery(deliveryEvent, task.prUrl, task.status),
+    },
+  ];
+}
+
+function categorizeLogs(logs: ExecutionLog[]): TimelineSection[] {
+  const order: LogCategory[] = [
+    "planning",
+    "resume",
+    "environment",
+    "exploration",
+    "implementation",
+    "validation",
+    "delivery",
+    "problems",
+    "other",
+  ];
+
+  const groups = new Map<LogCategory, ExecutionLog[]>();
+  for (const log of logs) {
+    const category = categorizeLog(log);
+    const existing = groups.get(category) ?? [];
+    existing.push(log);
+    groups.set(category, existing);
+  }
+
+  return order
+    .map((category) => {
+      const categoryLogs = groups.get(category) ?? [];
+      if (categoryLogs.length === 0) return null;
+
+      return {
+        category,
+        label: categoryLabel(category),
+        description: categoryDescription(category),
+        logs: categoryLogs,
+      } satisfies TimelineSection;
+    })
+    .filter((section): section is TimelineSection => Boolean(section));
+}
+
+function categorizeLog(log: ExecutionLog): LogCategory {
+  if (isProblemLog(log)) return "problems";
+  if (log.event.startsWith("classification.") || log.event.startsWith("plan.")) {
+    return log.event.startsWith("plan.resume") ? "resume" : "planning";
+  }
+  if (log.event === "setup" || log.event === "setup_error" || log.event === "secrets_injection") {
+    return "environment";
+  }
+  if (log.event === "review.completed") return "validation";
+  if (log.event.startsWith("git.") || log.event.startsWith("pr.")) return "delivery";
+
+  if (log.event === "tool_call" || log.event === "tool_result") {
+    if (["write_file", "edit_file"].includes(log.toolName ?? "")) return "implementation";
+    if (["run", "git"].includes(log.toolName ?? "")) return "validation";
+    if (["read_file", "search", "list_dir", "glob", "grep"].includes(log.toolName ?? "")) {
+      return "exploration";
+    }
+  }
+
+  return "other";
+}
+
+function isProblemLog(log: ExecutionLog): boolean {
+  return [
+    "setup_error",
+    "plan.resume_failed",
+    "pr.skipped",
+    "pr.unavailable",
+    "git.no_changes",
+  ].includes(log.event);
+}
+
+function categoryLabel(category: LogCategory): string {
+  switch (category) {
+    case "planning":
+      return "Planning";
+    case "resume":
+      return "Resume";
+    case "environment":
+      return "Environment";
+    case "exploration":
+      return "Repo Exploration";
+    case "implementation":
+      return "Code Changes";
+    case "validation":
+      return "Validation";
+    case "delivery":
+      return "Git & PR";
+    case "problems":
+      return "Problems";
+    default:
+      return "Other";
+  }
+}
+
+function categoryDescription(category: LogCategory): string {
+  switch (category) {
+    case "planning":
+      return "Classification, plan generation, and approval checkpoints.";
+    case "resume":
+      return "Whether the approved plan resumed cleanly or had to restart.";
+    case "environment":
+      return "Repository setup, dependency install, and secrets loading.";
+    case "exploration":
+      return "Read/search/list activity while the agent inspected the repo.";
+    case "implementation":
+      return "Actual file editing and code-writing activity.";
+    case "validation":
+      return "Runs, reviews, and post-change verification.";
+    case "delivery":
+      return "Diff detection, commits, pushes, and pull request work.";
+    case "problems":
+      return "Why the task stalled, skipped work, or failed.";
+    default:
+      return "Events that did not fit the main buckets.";
+  }
+}
+
+function summarizeResume(log?: ExecutionLog): string {
+  if (!log) return "No resume event";
+  if (log.event === "plan.resume") return "Resumed approved session";
+  if (log.event === "plan.resume_fallback") return "Restarted from approved plan";
+  if (log.event === "plan.resume_failed") return "Resume failed";
+  return log.event;
+}
+
+function summarizeDelivery(log: ExecutionLog | undefined, prUrl: string | null, status: string): string {
+  if (prUrl) return "PR attached";
+  if (log?.event === "git.no_changes") return "No diff detected";
+  if (log?.event === "pr.unavailable") return "Push succeeded, PR missing";
+  if (log?.event === "pr.skipped") return "PR skipped";
+  if (status === "FAILED") return "Failed before delivery";
+  return "No delivery signal";
+}
+
+function formatEventLabel(log: ExecutionLog): string {
+  if ((log.event === "tool_call" || log.event === "tool_result") && log.toolName) {
+    return `${log.event}.${log.toolName}`;
+  }
+  return log.event;
+}
+
+function truncateLogResult(result: string): string {
+  return truncateSingleLine(result, 220);
+}
+
+function truncateSingleLine(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 3)}...`;
 }

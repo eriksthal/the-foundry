@@ -2,6 +2,10 @@ import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import { redirect } from "next/navigation";
 
+function isAuthDisabled() {
+  return process.env.FOUNDRY_DISABLE_AUTH?.trim().toLowerCase() === "true";
+}
+
 export function buildSignInUrl(returnBackUrl = "/") {
   const params = new URLSearchParams({ redirect_url: returnBackUrl });
   return `/sign-in?${params.toString()}`;
@@ -13,6 +17,10 @@ export function buildSignUpUrl(returnBackUrl = "/") {
 }
 
 export async function requireUser(returnBackUrl = "/") {
+  if (isAuthDisabled()) {
+    return { userId: "foundry-debug-user" };
+  }
+
   const session = await auth();
 
   if (!session.userId) {
@@ -23,6 +31,10 @@ export async function requireUser(returnBackUrl = "/") {
 }
 
 export async function requireApiUser() {
+  if (isAuthDisabled()) {
+    return { userId: "foundry-debug-user" };
+  }
+
   const session = await auth();
 
   if (!session.userId) {

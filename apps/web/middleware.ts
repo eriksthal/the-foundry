@@ -10,6 +10,10 @@ const isApiRoute = createRouteMatcher([
 ]);
 
 export default clerkMiddleware(async (auth, request) => {
+  if (process.env.FOUNDRY_DISABLE_AUTH?.trim().toLowerCase() === 'true') {
+    return;
+  }
+
   if (isPublicRoute(request) || isApiRoute(request)) {
     return;
   }

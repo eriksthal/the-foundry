@@ -98,6 +98,8 @@ docker compose up -d
 cp .env.example .env
 # Then fill in GITHUB_TOKEN, COPILOT_GITHUB_TOKEN, and FOUNDRY_APP_URL in .env
 # `FOUNDRY_REQUIRE_PULL_REQUEST` defaults to true and fails tasks that finish without a PR
+# `FOUNDRY_SETUP_RUN_BUILD` defaults to false so repo-wide builds do not run during worker setup
+# `FOUNDRY_DISABLE_AUTH=true` disables Clerk protection for remote debugging only
 
 # Generate Prisma client and push schema
 npm run db:generate
