@@ -41,6 +41,7 @@ type ExecutionEvidence = {
 };
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.WORKER_SESSION_TIMEOUT_MS) || 1_800_000;
+const MAX_ORCHESTRATOR_RECOVERY_ATTEMPTS = 4;
 
 export async function processTask(task: Task, project: Project): Promise<ProcessTaskOutcome> {
   const executionMode = determineExecutionMode(task);
@@ -962,7 +963,7 @@ async function executeTaskWithGuards(params: {
   let currentPrompt = params.prompt;
   let evidenceFailureReason: string | undefined;
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < MAX_ORCHESTRATOR_RECOVERY_ATTEMPTS; attempt += 1) {
     const response = await sendAndWaitWithSlidingTimeout(params.session, currentPrompt, params.task.id);
     const resultContent = response?.data?.content ?? "No response content";
     let parsed: OrchestratorResponse;
@@ -972,14 +973,15 @@ async function executeTaskWithGuards(params: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
 
-      if (attempt === 0) {
-        evidenceFailureReason = message;
-        await createLog(params.task.id, {
-          event: "orchestration.invalid_response",
-          phase: TaskPhase.CLASSIFY,
-          result: message,
-          payload: { rawContent: resultContent.slice(0, 4000) },
-        });
+      evidenceFailureReason = message;
+      await createLog(params.task.id, {
+        event: "orchestration.invalid_response",
+        phase: TaskPhase.CLASSIFY,
+        result: message,
+        payload: { rawContent: resultContent.slice(0, 4000), attempt },
+      });
+
+      if (attempt < MAX_ORCHESTRATOR_RECOVERY_ATTEMPTS - 1) {
         currentPrompt = buildInvalidResponseRetryPrompt(message);
         continue;
       }
@@ -1010,12 +1012,13 @@ async function executeTaskWithGuards(params: {
         evidence: params.evidence,
       });
 
-      if (failureReason && attempt === 0) {
+      if (failureReason && attempt < MAX_ORCHESTRATOR_RECOVERY_ATTEMPTS - 1) {
         evidenceFailureReason = failureReason;
         await createLog(params.task.id, {
           event: "implementation.evidence_missing",
           phase: TaskPhase.IMPLEMENT,
           result: failureReason,
+          payload: { attempt },
         });
         currentPrompt = buildImplementationRetryPrompt(failureReason);
         continue;
@@ -1081,6 +1084,24 @@ Return only the required JSON payload.`;
 }
 
 function buildInvalidResponseRetryPrompt(reason: string): string {
+  const invalidActionMatch = reason.match(/^Invalid orchestrator action: (.+)$/);
+  const invalidAction = invalidActionMatch?.[1];
+  const phaseLikeActionHint =
+    invalidAction && [
+      "CLASSIFY",
+      "PLAN",
+      "PLAN_DRAFT",
+      "WAITING_FOR_PLAN_APPROVAL",
+      "IMPLEMENT",
+      "REVIEW",
+      "REWORK",
+      "CREATE_PR",
+      "DONE",
+      "FAILED",
+    ].includes(invalidAction)
+      ? `You used "${invalidAction}" as an action, but that is a phase. If work is still ongoing, keep working and use the phase field to report progress. Use the action field only for COMPLETE, AWAIT_PLAN_APPROVAL, or FAIL.`
+      : null;
+
   return `${reason}
 
 Your previous response violated the orchestrator contract.
@@ -1094,6 +1115,9 @@ Rules:
 - MEDIUM tasks must continue automatically without approval.
 - Only COMPLEX tasks may return AWAIT_PLAN_APPROVAL.
 - Do not invent intermediate action names like PLAN.
+- Do not stop at planning for SMALL or MEDIUM tasks. Continue through implementation, review, and delivery.
+- If implementation is still in progress, keep executing instead of returning a non-terminal action.
+- ${phaseLikeActionHint ?? "Use the phase field for progress, and the action field only for terminal control decisions."}
 - If work is not finished, continue execution instead of summarizing.
 
 Return only one valid JSON payload.`;
