@@ -34,6 +34,11 @@ import {
 
 export type ProcessTaskOutcome = "completed" | "awaiting_plan_approval";
 type ExecutionMode = "fresh" | "resume_approved_plan" | "restart_from_approved_plan";
+type ExecutionEvidence = {
+  editToolCalls: number;
+  writeToolCalls: number;
+  reviewCompleted: boolean;
+};
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.WORKER_SESSION_TIMEOUT_MS) || 1_800_000;
 
@@ -61,7 +66,8 @@ export async function processTask(task: Task, project: Project): Promise<Process
 
     const customAgents = loadAgents();
     const memoryContext = await buildMemoryContext(project.id);
-    const hooks = buildHooks(task.id);
+    const evidence = createExecutionEvidence();
+    const hooks = buildHooks(task.id, evidence);
     const sessionConfig = {
       sessionId: initialSessionId,
       model: "gpt-4.1",
@@ -110,16 +116,26 @@ export async function processTask(task: Task, project: Project): Promise<Process
         : buildResumePrompt(task);
     console.info(`[runner] Sending prompt to Copilot for task ${task.id}`);
 
-    const response = await sendAndWaitWithSlidingTimeout(session, prompt, task.id);
-    const resultContent = response?.data?.content ?? "No response content";
-    const parsed = parseOrchestratorResponse(resultContent);
+    const executionResult = await executeTaskWithGuards({
+      session,
+      task,
+      project,
+      prompt,
+      evidence,
+      workDir: activeWorkDir,
+    });
+    const { parsed, resultContent, evidenceFailureReason } = executionResult;
     const prInfo =
       parsed.action === "COMPLETE"
         ? await finalizePullRequest(task, project, activeWorkDir, branchName, parsed.prUrl)
         : null;
 
     if (parsed.action === "COMPLETE" && isPullRequestRequired() && !prInfo?.url) {
-      throw new Error(prInfo?.error ?? "Task completed without an associated pull request.");
+      throw new Error(
+        prInfo?.error ??
+          evidenceFailureReason ??
+          "Task completed without an associated pull request.",
+      );
     }
 
     const outcome = await applyOrchestrationResult(task.id, parsed, {
@@ -351,9 +367,11 @@ async function injectSecrets(taskId: string, repoUrl: string, workDir: string): 
   }
 }
 
-function buildHooks(taskId: string) {
+function buildHooks(taskId: string, evidence: ExecutionEvidence) {
   return {
     onPreToolUse: async (input: { toolName: string; toolArgs: unknown }) => {
+      if (input.toolName === "edit_file") evidence.editToolCalls += 1;
+      if (input.toolName === "write_file") evidence.writeToolCalls += 1;
       await createLog(taskId, {
         event: "tool_call",
         toolName: input.toolName,
@@ -903,4 +921,128 @@ async function finalizePullRequest(
 
 function isPullRequestRequired(): boolean {
   return process.env.FOUNDRY_REQUIRE_PULL_REQUEST?.trim().toLowerCase() !== "false";
+}
+
+function createExecutionEvidence(): ExecutionEvidence {
+  return {
+    editToolCalls: 0,
+    writeToolCalls: 0,
+    reviewCompleted: false,
+  };
+}
+
+async function executeTaskWithGuards(params: {
+  session: {
+    sendAndWait: (options: { prompt: string }, timeoutMs?: number) => Promise<any>;
+    on: (handler: (event: { type: string }) => void) => (() => void) | void;
+  };
+  task: Task;
+  project: Project;
+  prompt: string;
+  evidence: ExecutionEvidence;
+  workDir: string;
+}): Promise<{
+  parsed: OrchestratorResponse;
+  resultContent: string;
+  evidenceFailureReason?: string;
+}> {
+  let currentPrompt = params.prompt;
+  let evidenceFailureReason: string | undefined;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await sendAndWaitWithSlidingTimeout(params.session, currentPrompt, params.task.id);
+    const resultContent = response?.data?.content ?? "No response content";
+    const parsed = parseOrchestratorResponse(resultContent);
+
+    if (parsed.review?.verdict) {
+      params.evidence.reviewCompleted = true;
+    }
+
+    if (parsed.action === "AWAIT_PLAN_APPROVAL" && parsed.scenario !== "COMPLEX") {
+      evidenceFailureReason =
+        `Only COMPLEX tasks may wait for plan approval, but the agent requested approval for ${parsed.scenario}.`;
+      await createLog(params.task.id, {
+        event: "orchestration.invalid_approval_request",
+        phase: TaskPhase.PLAN,
+        result: evidenceFailureReason,
+      });
+      currentPrompt = buildImplementationRetryPrompt(evidenceFailureReason);
+      continue;
+    }
+
+    if (parsed.action === "COMPLETE") {
+      const failureReason = getImplementationEvidenceFailure({
+        parsed,
+        workDir: params.workDir,
+        evidence: params.evidence,
+      });
+
+      if (failureReason && attempt === 0) {
+        evidenceFailureReason = failureReason;
+        await createLog(params.task.id, {
+          event: "implementation.evidence_missing",
+          phase: TaskPhase.IMPLEMENT,
+          result: failureReason,
+        });
+        currentPrompt = buildImplementationRetryPrompt(failureReason);
+        continue;
+      }
+
+      if (failureReason) {
+        throw new Error(failureReason);
+      }
+    }
+
+    return { parsed, resultContent, evidenceFailureReason };
+  }
+
+  throw new Error(evidenceFailureReason ?? "Task execution failed to produce valid implementation evidence.");
+}
+
+function getImplementationEvidenceFailure(params: {
+  parsed: OrchestratorResponse;
+  workDir: string;
+  evidence: ExecutionEvidence;
+}): string | null {
+  const { parsed, workDir, evidence } = params;
+  const gitStatus = getGitStatusSummary(workDir);
+  const hasGitChanges = gitStatus.hasUncommittedChanges || gitStatus.commitsAheadOfBase > 0;
+  const filesChanged = parsed.implementation?.filesChanged?.filter(Boolean) ?? [];
+  const hasEditTools = evidence.editToolCalls > 0 || evidence.writeToolCalls > 0;
+
+  if (parsed.scenario === "COMPLEX" && parsed.action === "AWAIT_PLAN_APPROVAL") {
+    return null;
+  }
+
+  if (!hasGitChanges && !hasEditTools && filesChanged.length === 0) {
+    return "The agent returned COMPLETE without editing files, producing a git diff, or listing changed files.";
+  }
+
+  if (!hasGitChanges && filesChanged.length > 0) {
+    return "The agent claimed files were changed, but the repository has no diff.";
+  }
+
+  if (hasGitChanges && filesChanged.length === 0) {
+    return "The repository has changes, but the agent did not report any changed files in its implementation summary.";
+  }
+
+  return null;
+}
+
+function buildImplementationRetryPrompt(reason: string): string {
+  return `${reason}
+
+Do not summarize or mark the task complete yet.
+
+You must now continue execution from IMPLEMENT and perform the work in the repository.
+
+Rules:
+- MEDIUM tasks must continue automatically without human approval.
+- Only COMPLEX tasks may return AWAIT_PLAN_APPROVAL.
+- You may return COMPLETE only after real repository work has happened.
+- Use the available tools to inspect, edit, validate, and review the code.
+- Your implementation.filesChanged must list the actual changed files.
+- If you truly cannot proceed safely, return FAIL with the concrete blocker.
+
+Return only the required JSON payload.`;
 }

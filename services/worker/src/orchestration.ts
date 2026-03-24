@@ -72,10 +72,12 @@ ${task.description}
    - SMALL: skip planner unless hidden risk is discovered, then implement, review, rework if needed, create PR, finish.
    - MEDIUM: produce an executable plan, then implement, review, rework if needed, create PR, finish.
    - COMPLEX: produce a full plan package and STOP after planning with action AWAIT_PLAN_APPROVAL.
+   - MEDIUM must continue automatically without asking for approval.
 3. Never ask follow-up questions. Pick the safest reasonable assumption, record it, and continue.
 4. Use subagents intentionally. The planner returns plans, implementers write code, reviewers gate quality.
 5. The worker handles push and PR creation after execution. Only include prUrl if you obtained a verified real URL from a tool result. Never invent or guess it.
-6. Return only the required JSON payload.`;
+6. You may return COMPLETE only after real repository work has happened and implementation.filesChanged lists the actual changed files.
+7. Return only the required JSON payload.`;
 }
 
 export function buildResumePrompt(task: Task): string {
@@ -150,6 +152,8 @@ function baseInstructions(): string {
 - Always emit exactly one JSON object inside a \`\`\`json fenced block.
 - Always include: version, scenario, action, phase, classification, finalSummary.
 - Never fabricate repository, branch, commit, or pull request URLs.
+- Never return COMPLETE if no files were changed.
+- Only COMPLEX tasks may return AWAIT_PLAN_APPROVAL.
 - Scenario values: SMALL | MEDIUM | COMPLEX.
 - Action values:
   - COMPLETE: task execution finished successfully.
