@@ -128,6 +128,10 @@ export async function processTask(task: Task, project: Project): Promise<Process
         ? await finalizePullRequest(task, project, workDir, branchName, parsed.prUrl)
         : null;
 
+    if (parsed.action === "COMPLETE" && isPullRequestRequired() && !prInfo?.url) {
+      throw new Error(prInfo?.error ?? "Task completed without an associated pull request.");
+    }
+
     const outcome = await applyOrchestrationResult(task.id, parsed, {
       sessionId,
       workspacePath: session.workspacePath,
@@ -595,26 +599,28 @@ async function finalizePullRequest(
   workDir: string,
   branchName: string,
   reportedPrUrl?: string,
-): Promise<{ url: string } | null> {
+): Promise<{ url?: string; error?: string } | null> {
   const githubToken = process.env.GITHUB_TOKEN?.trim();
   const repoRef = parseGitHubRepoUrl(project.repoUrl);
 
   if (!githubToken) {
+    const error = "Missing GITHUB_TOKEN; skipping PR creation.";
     await createLog(task.id, {
       event: "pr.skipped",
       phase: TaskPhase.CREATE_PR,
-      result: "Missing GITHUB_TOKEN; skipping PR creation.",
+      result: error,
     });
-    return null;
+    return { error };
   }
 
   if (!repoRef) {
+    const error = `Unsupported repository URL: ${project.repoUrl}`;
     await createLog(task.id, {
       event: "pr.skipped",
       phase: TaskPhase.CREATE_PR,
-      result: `Unsupported repository URL: ${project.repoUrl}`,
+      result: error,
     });
-    return null;
+    return { error };
   }
 
   const hadLocalChanges = ensureCommittedChanges(workDir, task.title);
@@ -627,7 +633,30 @@ async function finalizePullRequest(
   }
 
   const gitStatus = getGitStatusSummary(workDir);
-  const needsPush = hadLocalChanges || gitStatus.commitsAheadOfBase > 0 || !gitStatus.branchExistsOnRemote;
+  const hasCommittedDiff = gitStatus.commitsAheadOfBase > 0;
+  const hasAnyDiff = hadLocalChanges || hasCommittedDiff;
+
+  await createLog(task.id, {
+    event: "git.diff_summary",
+    phase: TaskPhase.CREATE_PR,
+    result: JSON.stringify({
+      hasUncommittedChanges: gitStatus.hasUncommittedChanges,
+      branchExistsOnRemote: gitStatus.branchExistsOnRemote,
+      commitsAheadOfBase: gitStatus.commitsAheadOfBase,
+    }),
+  });
+
+  if (!hasAnyDiff) {
+    const error = "No code changes were detected for this task; branch push and PR creation were skipped.";
+    await createLog(task.id, {
+      event: "git.no_changes",
+      phase: TaskPhase.CREATE_PR,
+      result: error,
+    });
+    return { error };
+  }
+
+  const needsPush = hadLocalChanges || hasCommittedDiff || !gitStatus.branchExistsOnRemote;
 
   if (!needsPush) {
     const existingPr = await findOrCreatePullRequest({
@@ -654,7 +683,7 @@ async function finalizePullRequest(
       return { url: existingPr.url };
     }
 
-    return null;
+    return { error: "No existing PR found for the task branch and no push was required." };
   }
 
   pushBranchToOrigin(workDir, branchName, githubToken);
@@ -672,12 +701,13 @@ async function finalizePullRequest(
   });
 
   if (!pr) {
+    const error = "Push succeeded but no PR could be found or created.";
     await createLog(task.id, {
       event: "pr.unavailable",
       phase: TaskPhase.CREATE_PR,
-      result: "Push succeeded but no PR could be found or created.",
+      result: error,
     });
-    return null;
+    return { error };
   }
 
   if (reportedPrUrl && pr.url !== reportedPrUrl) {
@@ -695,4 +725,8 @@ async function finalizePullRequest(
   });
 
   return { url: pr.url };
+}
+
+function isPullRequestRequired(): boolean {
+  return process.env.FOUNDRY_REQUIRE_PULL_REQUEST?.trim().toLowerCase() !== "false";
 }

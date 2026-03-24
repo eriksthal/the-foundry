@@ -97,6 +97,7 @@ docker compose up -d
 # Copy environment variables
 cp .env.example .env
 # Then fill in GITHUB_TOKEN, COPILOT_GITHUB_TOKEN, and FOUNDRY_APP_URL in .env
+# `FOUNDRY_REQUIRE_PULL_REQUEST` defaults to true and fails tasks that finish without a PR
 
 # Generate Prisma client and push schema
 npm run db:generate

@@ -208,6 +208,11 @@ export default async function TaskDetailPage({
         <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-5">
           <h2 className="mb-2 text-sm font-semibold text-zinc-400">Latest Outcome</h2>
           <p className="whitespace-pre-wrap text-sm">{task.result}</p>
+          {!task.prUrl && task.status === "COMPLETED" && (
+            <p className="mt-3 text-sm text-yellow-300">
+              No pull request is associated with this completed task.
+            </p>
+          )}
           {task.prUrl && (
             <div className="mt-3 space-y-2">
               <a
