@@ -13,3 +13,5 @@ if (process.env.NODE_ENV !== "production") {
 export { PrismaClient };
 export type { Project, Task, ExecutionLog, ProjectMemory, TaskFeedback } from "@prisma/client";
 export { TaskStatus, MemoryCategory, MemorySource } from "@prisma/client";
+
+export * as secrets from './secrets';

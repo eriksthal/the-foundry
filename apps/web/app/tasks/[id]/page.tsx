@@ -2,6 +2,8 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@the-foundry/db";
 
+import { requireUser } from "../../../lib/auth";
+
 export const dynamic = "force-dynamic";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -19,6 +21,7 @@ export default async function TaskDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  await requireUser(`/tasks/${id}`);
 
   const task = await prisma.task.findUnique({
     where: { id },

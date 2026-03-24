@@ -1,3 +1,22 @@
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load .env from repository root (services/worker may run with cwd inside the package)
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
+function maskToken(t?: string | null) {
+  if (!t) return '<missing>';
+  if (t.length <= 8) return `${t.slice(0, 2)}...${t.slice(-2)}`;
+  return `${t.slice(0, 4)}...${t.slice(-4)}`;
+}
+
+console.info('[worker] GITHUB_TOKEN present:', Boolean(process.env.GITHUB_TOKEN), 'value:', maskToken(process.env.GITHUB_TOKEN));
+console.info('[worker] COPILOT_GITHUB_TOKEN present:', Boolean(process.env.COPILOT_GITHUB_TOKEN), 'value:', maskToken(process.env.COPILOT_GITHUB_TOKEN));
+
 import { prisma, TaskStatus } from "@the-foundry/db";
 import { processTask } from "./runner.js";
 
@@ -19,7 +38,7 @@ async function pollForTasks(): Promise<void> {
   try {
     await prisma.task.update({
       where: { id: task.id },
-      data: { status: TaskStatus.IN_PROGRESS, startedAt: new Date() },
+      data: { status: TaskStatus.IN_PROGRESS, startedAt: new Date(), lastActivityAt: new Date() },
     });
 
     await processTask(task, task.project);

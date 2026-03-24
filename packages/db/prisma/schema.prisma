@@ -60,6 +60,7 @@ model Task {
   errorLog    String?    @map("error_log")
   createdAt   DateTime   @default(now()) @map("created_at")
   updatedAt   DateTime   @updatedAt @map("updated_at")
+  lastActivityAt DateTime? @map("last_activity_at")
   startedAt   DateTime?  @map("started_at")
   completedAt DateTime?  @map("completed_at")
 
@@ -120,4 +121,17 @@ model TaskFeedback {
   task          Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
   @@map("task_feedback")
+}
+
+model Secret {
+  id         String   @id @default(uuid())
+  owner      String
+  repo       String
+  envBlob    String   @map("env_blob") // Base64(IV||tag||ciphertext)
+  keyVersion String?  @map("key_version")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([owner, repo])
+  @@map("secrets")
 }

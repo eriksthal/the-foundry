@@ -1,9 +1,15 @@
 import { redirect } from "next/navigation";
 import { prisma } from "@the-foundry/db";
 
-export default function NewProjectPage() {
+import { requireUser } from "../../../lib/auth";
+
+export default async function NewProjectPage() {
+  await requireUser("/projects/new");
+
   async function createProject(formData: FormData) {
     "use server";
+
+    await requireUser("/projects/new");
 
     const name = formData.get("name") as string;
     const repoUrl = formData.get("repoUrl") as string;

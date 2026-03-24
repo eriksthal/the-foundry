@@ -32,6 +32,26 @@ An AI-powered task orchestration system that uses the GitHub Copilot SDK to auto
 | **Build**    | Turborepo, npm workspaces, TypeScript 5.7 (strict) |
 | **Linting**  | ESLint 9, Prettier 3                             |
 
+
+## Environment Setup
+
+### FOUNDRY_SECRETS_KEY
+
+You **must** set a `FOUNDRY_SECRETS_KEY` in your root `.env` file. This key is required for all encryption/decryption of secrets in the system.
+
+- **How to generate a suitable key:**
+    - Run: `openssl rand -base64 32`
+    - Copy the output and add to your `.env`:
+        ```env
+        FOUNDRY_SECRETS_KEY=...your_base64_key...
+        ```
+- The key must be exactly 32 bytes (base64-encoded).
+- Ensure your **worker** and all **API routes** that use secrets load this variable. In local dev, call `dotenv.config()` in your entrypoint before using any code that imports `@the-foundry/db/src/secrets`.
+
+### API Input Validation
+
+It is **recommended** to use [Zod](https://zod.dev/) for validating all API input. This helps prevent invalid or unsafe data from reaching your backend logic.
+
 ## Monorepo Structure
 
 ```

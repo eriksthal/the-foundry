@@ -1,10 +1,14 @@
 import { NextResponse } from "next/server";
 import { prisma, type TaskStatus } from "@the-foundry/db";
+import { requireApiUser, unauthorizedJson } from "../../../../lib/auth";
 
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const session = await requireApiUser();
+  if (!session) return unauthorizedJson();
+
   const { id } = await params;
   const body = (await request.json()) as {
     status?: TaskStatus;

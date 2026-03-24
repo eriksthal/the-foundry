@@ -1,11 +1,15 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@the-foundry/db";
+import { requireApiUser, unauthorizedJson } from "../../../../../lib/auth";
 
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  const session = await requireApiUser();
+  if (!session) return unauthorizedJson();
+
   const body = (await request.json()) as {
     event: string;
     toolName?: string;

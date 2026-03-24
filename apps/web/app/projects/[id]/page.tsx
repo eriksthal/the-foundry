@@ -2,6 +2,9 @@ import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { prisma, TaskStatus } from "@the-foundry/db";
 
+import { requireUser } from "../../../lib/auth";
+import { SecretsSection } from "./SecretsSection";
+
 export const dynamic = "force-dynamic";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -19,6 +22,7 @@ export default async function ProjectDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  await requireUser(`/projects/${id}`);
 
   const project = await prisma.project.findUnique({
     where: { id },
@@ -31,7 +35,7 @@ export default async function ProjectDetailPage({
 
   async function createTask(formData: FormData) {
     "use server";
-
+    await requireUser(`/projects/${id}`);
     const title = formData.get("title") as string;
     const description = formData.get("description") as string;
 
@@ -53,7 +57,7 @@ export default async function ProjectDetailPage({
 
   async function approveTask(formData: FormData) {
     "use server";
-
+    await requireUser(`/projects/${id}`);
     const taskId = formData.get("taskId") as string;
     await prisma.task.update({
       where: { id: taskId },
@@ -65,7 +69,7 @@ export default async function ProjectDetailPage({
 
   async function submitForApproval(formData: FormData) {
     "use server";
-
+    await requireUser(`/projects/${id}`);
     const taskId = formData.get("taskId") as string;
     await prisma.task.update({
       where: { id: taskId },
@@ -111,6 +115,9 @@ export default async function ProjectDetailPage({
           </button>
         </form>
       </div>
+
+      {/* Secrets Management Section */}
+      <SecretsSection project={project} />
 
       {/* Task List */}
       <div className="space-y-3">
