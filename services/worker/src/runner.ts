@@ -35,14 +35,15 @@ import {
 export type ProcessTaskOutcome = "completed" | "awaiting_plan_approval";
 type ExecutionMode = "fresh" | "resume_approved_plan" | "restart_from_approved_plan";
 type ExecutionEvidence = {
+  totalToolCalls: number;
   editToolCalls: number;
   writeToolCalls: number;
+  runToolCalls: number;
+  runCommands: string[];
   reviewCompleted: boolean;
 };
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.WORKER_SESSION_TIMEOUT_MS) || 1_800_000;
-const MAX_ORCHESTRATOR_RECOVERY_ATTEMPTS = 4;
-
 export async function processTask(task: Task, project: Project): Promise<ProcessTaskOutcome> {
   const executionMode = determineExecutionMode(task);
   let activeWorkDir =
@@ -72,7 +73,6 @@ export async function processTask(task: Task, project: Project): Promise<Process
     const sessionConfig = {
       sessionId: initialSessionId,
       model: "gpt-4.1",
-      agent: "orchestrator",
       customAgents,
       workingDirectory: activeWorkDir,
       streaming: true,
@@ -371,8 +371,14 @@ async function injectSecrets(taskId: string, repoUrl: string, workDir: string): 
 function buildHooks(taskId: string, evidence: ExecutionEvidence) {
   return {
     onPreToolUse: async (input: { toolName: string; toolArgs: unknown }) => {
+      evidence.totalToolCalls += 1;
       if (input.toolName === "edit_file") evidence.editToolCalls += 1;
       if (input.toolName === "write_file") evidence.writeToolCalls += 1;
+      if (input.toolName === "run") {
+        evidence.runToolCalls += 1;
+        const command = extractRunCommand(input.toolArgs);
+        if (command) evidence.runCommands.push(command.slice(0, 500));
+      }
       await createLog(taskId, {
         event: "tool_call",
         toolName: input.toolName,
@@ -579,6 +585,19 @@ async function persistSessionEvent(
       result: event.data ? JSON.stringify(event.data).slice(0, 2000) : undefined,
     });
 
+    if (event.type === "subagent.selected") {
+      const tools = Array.isArray(event.data?.tools)
+        ? event.data.tools.filter((tool): tool is string => typeof tool === "string")
+        : null;
+
+      await createLog(taskId, {
+        event: "agent.tools_available",
+        agentName: typeof event.data?.agentName === "string" ? event.data.agentName : undefined,
+        payload: tools ? { tools } : undefined,
+        result: tools ? tools.join(", ").slice(0, 2000) : "all tools",
+      });
+    }
+
     await prisma.task.update({
       where: { id: taskId },
       data: { lastActivityAt: new Date() },
@@ -706,7 +725,7 @@ async function createCopilotSession(
     sessionConfig: {
       sessionId: string;
       model: string;
-      agent: string;
+      agent?: string;
       customAgents: ReturnType<typeof loadAgents>;
       workingDirectory: string;
       streaming: boolean;
@@ -939,8 +958,11 @@ function isPullRequestRequired(): boolean {
 
 function createExecutionEvidence(): ExecutionEvidence {
   return {
+    totalToolCalls: 0,
     editToolCalls: 0,
     writeToolCalls: 0,
+    runToolCalls: 0,
+    runCommands: [],
     reviewCompleted: false,
   };
 }
@@ -960,79 +982,75 @@ async function executeTaskWithGuards(params: {
   resultContent: string;
   evidenceFailureReason?: string;
 }> {
-  let currentPrompt = params.prompt;
-  let evidenceFailureReason: string | undefined;
+  const response = await sendAndWaitWithSlidingTimeout(params.session, params.prompt, params.task.id);
+  const resultContent = response?.data?.content ?? "No response content";
+  let parsed: OrchestratorResponse;
 
-  for (let attempt = 0; attempt < MAX_ORCHESTRATOR_RECOVERY_ATTEMPTS; attempt += 1) {
-    const response = await sendAndWaitWithSlidingTimeout(params.session, currentPrompt, params.task.id);
-    const resultContent = response?.data?.content ?? "No response content";
-    let parsed: OrchestratorResponse;
-
-    try {
-      parsed = parseOrchestratorResponse(resultContent);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-
-      evidenceFailureReason = message;
-      await createLog(params.task.id, {
-        event: "orchestration.invalid_response",
-        phase: TaskPhase.CLASSIFY,
-        result: message,
-        payload: { rawContent: resultContent.slice(0, 4000), attempt },
-      });
-
-      if (attempt < MAX_ORCHESTRATOR_RECOVERY_ATTEMPTS - 1) {
-        currentPrompt = buildInvalidResponseRetryPrompt(message);
-        continue;
-      }
-
-      throw error;
-    }
-
-    if (parsed.review?.verdict) {
-      params.evidence.reviewCompleted = true;
-    }
-
-    if (parsed.action === "AWAIT_PLAN_APPROVAL" && parsed.scenario !== "COMPLEX") {
-      evidenceFailureReason =
-        `Only COMPLEX tasks may wait for plan approval, but the agent requested approval for ${parsed.scenario}.`;
-      await createLog(params.task.id, {
-        event: "orchestration.invalid_approval_request",
-        phase: TaskPhase.PLAN,
-        result: evidenceFailureReason,
-      });
-      currentPrompt = buildImplementationRetryPrompt(evidenceFailureReason);
-      continue;
-    }
-
-    if (parsed.action === "COMPLETE") {
-      const failureReason = getImplementationEvidenceFailure({
-        parsed,
-        workDir: params.workDir,
-        evidence: params.evidence,
-      });
-
-      if (failureReason && attempt < MAX_ORCHESTRATOR_RECOVERY_ATTEMPTS - 1) {
-        evidenceFailureReason = failureReason;
-        await createLog(params.task.id, {
-          event: "implementation.evidence_missing",
-          phase: TaskPhase.IMPLEMENT,
-          result: failureReason,
-          payload: { attempt },
-        });
-        currentPrompt = buildImplementationRetryPrompt(failureReason);
-        continue;
-      }
-
-      if (failureReason) {
-        throw new Error(failureReason);
-      }
-    }
-
-    return { parsed, resultContent, evidenceFailureReason };
+  try {
+    parsed = parseOrchestratorResponse(resultContent);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await createLog(params.task.id, {
+      event: "orchestration.invalid_response",
+      phase: TaskPhase.CLASSIFY,
+      result: message,
+      payload: { rawContent: resultContent.slice(0, 4000) },
+    });
+    throw error;
   }
 
-  throw new Error(evidenceFailureReason ?? "Task execution failed to produce valid implementation evidence.");
+  if (parsed.review?.verdict) {
+    params.evidence.reviewCompleted = true;
+  }
+
+  if (parsed.action === "AWAIT_PLAN_APPROVAL" && parsed.scenario !== "COMPLEX") {
+    const evidenceFailureReason =
+      `Only COMPLEX tasks may wait for plan approval, but the agent requested approval for ${parsed.scenario}.`;
+    await createLog(params.task.id, {
+      event: "orchestration.invalid_approval_request",
+      phase: TaskPhase.PLAN,
+      result: evidenceFailureReason,
+    });
+    throw new Error(evidenceFailureReason);
+  }
+
+  if (parsed.action === "COMPLETE") {
+    const failureReason = getImplementationEvidenceFailure({
+      parsed,
+      workDir: params.workDir,
+      evidence: params.evidence,
+    });
+
+    if (failureReason) {
+      await createLog(params.task.id, {
+        event: "implementation.evidence_missing",
+        phase: TaskPhase.IMPLEMENT,
+        result: failureReason,
+      });
+      throw new Error(failureReason);
+    }
+  }
+
+  if (parsed.action === "FAIL") {
+    const failureReason = getFailureEvidenceFailure({
+      parsed,
+      evidence: params.evidence,
+    });
+
+    if (failureReason) {
+      await createLog(params.task.id, {
+        event: "blocker.evidence_missing",
+        phase: TaskPhase.FAILED,
+        result: failureReason,
+        payload: {
+          runCommands: params.evidence.runCommands,
+        },
+      });
+      throw new Error(failureReason);
+    }
+  }
+
+  return { parsed, resultContent };
 }
 
 function getImplementationEvidenceFailure(params: {
@@ -1065,60 +1083,93 @@ function getImplementationEvidenceFailure(params: {
   return null;
 }
 
-function buildImplementationRetryPrompt(reason: string): string {
-  return `${reason}
+function getFailureEvidenceFailure(params: {
+  parsed: OrchestratorResponse;
+  evidence: ExecutionEvidence;
+}): string | null {
+  const { parsed, evidence } = params;
+  const blockers = parsed.implementation?.blockers?.filter(Boolean) ?? [];
+  const blockerText = `${parsed.finalSummary}\n${blockers.join("\n")}`.toLowerCase();
 
-Do not summarize or mark the task complete yet.
+  if (evidence.totalToolCalls === 0) {
+    return "The agent returned FAIL without using any tools to gather evidence for the blocker.";
+  }
 
-You must now continue execution from IMPLEMENT and perform the work in the repository.
+  if (requiresRunEvidence(blockerText)) {
+    if (evidence.runToolCalls === 0) {
+      return "The agent reported a command, runtime, build, lint, or test blocker without using the run tool.";
+    }
 
-Rules:
-- MEDIUM tasks must continue automatically without human approval.
-- Only COMPLEX tasks may return AWAIT_PLAN_APPROVAL.
-- You may return COMPLETE only after real repository work has happened.
-- Use the available tools to inspect, edit, validate, and review the code.
-- Your implementation.filesChanged must list the actual changed files.
-- If you truly cannot proceed safely, return FAIL with the concrete blocker.
+    if (!hasRelevantRunEvidence(blockerText, evidence.runCommands)) {
+      return "The agent reported a specific command or validation blocker, but the captured run commands do not match that claim.";
+    }
+  }
 
-Return only the required JSON payload.`;
+  return null;
 }
 
-function buildInvalidResponseRetryPrompt(reason: string): string {
-  const invalidActionMatch = reason.match(/^Invalid orchestrator action: (.+)$/);
-  const invalidAction = invalidActionMatch?.[1];
-  const phaseLikeActionHint =
-    invalidAction && [
-      "CLASSIFY",
-      "PLAN",
-      "PLAN_DRAFT",
-      "WAITING_FOR_PLAN_APPROVAL",
-      "IMPLEMENT",
-      "REVIEW",
-      "REWORK",
-      "CREATE_PR",
-      "DONE",
-      "FAILED",
-    ].includes(invalidAction)
-      ? `You used "${invalidAction}" as an action, but that is a phase. If work is still ongoing, keep working and use the phase field to report progress. Use the action field only for COMPLETE, AWAIT_PLAN_APPROVAL, or FAIL.`
-      : null;
+function requiresRunEvidence(blockerText: string): boolean {
+  return /\b(vitest|jest|test runner|runtime|command|shell|npm|pnpm|yarn|bun|pytest|typecheck|tsc|lint|eslint|build|compile)\b/.test(
+    blockerText,
+  );
+}
 
-  return `${reason}
+function hasRelevantRunEvidence(blockerText: string, runCommands: string[]): boolean {
+  const commands = runCommands.map((command) => command.toLowerCase());
 
-Your previous response violated the orchestrator contract.
+  if (blockerText.includes("vitest")) {
+    return commands.some((command) => command.includes("vitest"));
+  }
 
-You must correct it now and continue the task.
+  if (/\bjest\b/.test(blockerText)) {
+    return commands.some((command) => command.includes("jest"));
+  }
 
-Rules:
-- Valid actions are exactly: COMPLETE, AWAIT_PLAN_APPROVAL, FAIL.
-- Valid scenarios are exactly: SMALL, MEDIUM, COMPLEX.
-- Valid phases are exactly: CLASSIFY, PLAN, PLAN_DRAFT, WAITING_FOR_PLAN_APPROVAL, IMPLEMENT, REVIEW, REWORK, CREATE_PR, DONE, FAILED.
-- MEDIUM tasks must continue automatically without approval.
-- Only COMPLEX tasks may return AWAIT_PLAN_APPROVAL.
-- Do not invent intermediate action names like PLAN.
-- Do not stop at planning for SMALL or MEDIUM tasks. Continue through implementation, review, and delivery.
-- If implementation is still in progress, keep executing instead of returning a non-terminal action.
-- ${phaseLikeActionHint ?? "Use the phase field for progress, and the action field only for terminal control decisions."}
-- If work is not finished, continue execution instead of summarizing.
+  if (/\b(typecheck|tsc)\b/.test(blockerText)) {
+    return commands.some(
+      (command) => command.includes("typecheck") || command.includes("tsc"),
+    );
+  }
 
-Return only one valid JSON payload.`;
+  if (/\b(lint|eslint)\b/.test(blockerText)) {
+    return commands.some(
+      (command) => command.includes("lint") || command.includes("eslint"),
+    );
+  }
+
+  if (/\b(build|compile)\b/.test(blockerText)) {
+    return commands.some(
+      (command) => command.includes("build") || command.includes("compile"),
+    );
+  }
+
+  if (/\b(test|test runner)\b/.test(blockerText)) {
+    return commands.some(
+      (command) =>
+        command.includes(" test") ||
+        command.includes("vitest") ||
+        command.includes("jest") ||
+        command.includes("pytest"),
+    );
+  }
+
+  return commands.length > 0;
+}
+
+function extractRunCommand(toolArgs: unknown): string | null {
+  if (!toolArgs || typeof toolArgs !== "object") return null;
+
+  const candidate = toolArgs as Record<string, unknown>;
+  const command =
+    candidate.command ??
+    candidate.cmd ??
+    candidate.script ??
+    candidate.args;
+
+  if (typeof command === "string") return command;
+  if (Array.isArray(command)) {
+    return command.filter((value): value is string => typeof value === "string").join(" ");
+  }
+
+  return null;
 }
