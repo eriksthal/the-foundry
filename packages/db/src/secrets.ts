@@ -8,6 +8,7 @@
  * - The worker and all API routes that use secrets must have access to this env var.
  */
 import crypto from 'node:crypto';
+import { PrismaClient } from "@prisma/client";
 import { prisma } from '.';
 
 
@@ -45,7 +46,8 @@ export function decryptEnv(blobBase64: string): string {
 
 export async function upsertSecret(owner: string, repo: string, plaintextEnv: string, keyVersion?: string) {
   const envBlob = encryptEnv(plaintextEnv);
-  return prisma.secret.upsert({
+  const db = prisma as PrismaClient;
+  return db.secret.upsert({
     where: { owner_repo: { owner, repo } },
     update: { envBlob, keyVersion },
     create: { owner, repo, envBlob, keyVersion },
@@ -53,7 +55,8 @@ export async function upsertSecret(owner: string, repo: string, plaintextEnv: st
 }
 
 export async function getDecryptedSecret(owner: string, repo: string): Promise<string | null> {
-  const row = await prisma.secret.findUnique({ where: { owner_repo: { owner, repo } } });
+  const db = prisma as PrismaClient;
+  const row = await db.secret.findUnique({ where: { owner_repo: { owner, repo } } });
   if (!row) return null;
   try {
     return decryptEnv(row.envBlob);
@@ -70,7 +73,8 @@ export async function getDecryptedSecret(owner: string, repo: string): Promise<s
  * This is a security measure to prevent leaking metadata about secret names or values.
  */
 export async function deleteSecret(owner: string, repo: string) {
-  return prisma.secret.deleteMany({ where: { owner, repo } });
+  const db = prisma as PrismaClient;
+  return db.secret.deleteMany({ where: { owner, repo } });
 }
 
 export default {

@@ -27,10 +27,14 @@ export default async function Home() {
         <p className="mt-2 text-zinc-400">AI task orchestration control panel</p>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
         <StatCard label="Projects" value={projectCount} />
         <StatCard label="Approved" value={statusMap["APPROVED"] ?? 0} />
         <StatCard label="In Progress" value={statusMap["IN_PROGRESS"] ?? 0} />
+        <StatCard
+          label="Plan Approval"
+          value={statusMap["WAITING_FOR_PLAN_APPROVAL"] ?? 0}
+        />
         <StatCard label="Completed" value={statusMap["COMPLETED"] ?? 0} />
       </div>
 

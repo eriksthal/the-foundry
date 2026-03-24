@@ -12,6 +12,7 @@ const STATUS_COLORS: Record<string, string> = {
   PENDING_APPROVAL: "bg-yellow-700",
   APPROVED: "bg-blue-700",
   IN_PROGRESS: "bg-purple-700",
+  WAITING_FOR_PLAN_APPROVAL: "bg-orange-700",
   COMPLETED: "bg-green-700",
   FAILED: "bg-red-700",
 };
@@ -145,6 +146,16 @@ export default async function ProjectDetailPage({
                   </span>
                 </div>
                 <p className="text-sm text-zinc-400 line-clamp-2">{task.description}</p>
+                {task.scenario && (
+                  <p className="text-xs text-zinc-500">
+                    Scenario: {task.scenario} {task.phase ? `· Phase: ${task.phase}` : ""}
+                  </p>
+                )}
+                {task.status === "WAITING_FOR_PLAN_APPROVAL" && (
+                  <p className="text-xs text-orange-300">
+                    Plan is ready for review in the task detail view.
+                  </p>
+                )}
                 {task.prUrl && (
                   <a
                     href={task.prUrl}

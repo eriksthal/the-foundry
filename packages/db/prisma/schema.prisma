@@ -14,7 +14,34 @@ enum TaskStatus {
   PENDING_APPROVAL
   APPROVED
   IN_PROGRESS
+  WAITING_FOR_PLAN_APPROVAL
   COMPLETED
+  FAILED
+}
+
+enum TaskScenario {
+  SMALL
+  MEDIUM
+  COMPLEX
+}
+
+enum PlanApprovalStatus {
+  NOT_REQUIRED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum TaskPhase {
+  CLASSIFY
+  PLAN
+  PLAN_DRAFT
+  WAITING_FOR_PLAN_APPROVAL
+  IMPLEMENT
+  REVIEW
+  REWORK
+  CREATE_PR
+  DONE
   FAILED
 }
 
@@ -54,6 +81,16 @@ model Task {
   title       String
   description String
   status      TaskStatus @default(DRAFT)
+  scenario    TaskScenario?
+  phase       TaskPhase?
+  classificationReason String? @map("classification_reason")
+  riskLevel   String?    @map("risk_level")
+  estimatedTracks Int?   @map("estimated_tracks")
+  planApprovalStatus PlanApprovalStatus @default(NOT_REQUIRED) @map("plan_approval_status")
+  planContent Json?      @map("plan_content")
+  copilotSessionId String? @map("copilot_session_id")
+  copilotWorkspacePath String? @map("copilot_workspace_path")
+  workingDirectory String? @map("working_directory")
   branch      String?
   prUrl       String?    @map("pr_url")
   result      String?
@@ -77,8 +114,11 @@ model ExecutionLog {
   id        String   @id @default(uuid())
   taskId    String   @map("task_id")
   event     String
+  phase     TaskPhase?
+  agentName String?  @map("agent_name")
   toolName  String?  @map("tool_name")
   toolArgs  Json?    @map("tool_args")
+  payload   Json?    @map("payload")
   result    String?
   timestamp DateTime @default(now())
 

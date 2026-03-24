@@ -17,14 +17,18 @@ function maskToken(t?: string | null) {
 console.info('[worker] GITHUB_TOKEN present:', Boolean(process.env.GITHUB_TOKEN), 'value:', maskToken(process.env.GITHUB_TOKEN));
 console.info('[worker] COPILOT_GITHUB_TOKEN present:', Boolean(process.env.COPILOT_GITHUB_TOKEN), 'value:', maskToken(process.env.COPILOT_GITHUB_TOKEN));
 
-import { prisma, TaskStatus } from "@the-foundry/db";
+import { PlanApprovalStatus, prisma, TaskStatus } from "@the-foundry/db";
 import { processTask } from "./runner.js";
 
 const POLL_INTERVAL_MS = 10_000;
 
 async function pollForTasks(): Promise<void> {
   const tasks = await prisma.task.findMany({
-    where: { status: TaskStatus.APPROVED },
+    where: {
+      OR: [
+        { status: TaskStatus.APPROVED, planApprovalStatus: { not: PlanApprovalStatus.REJECTED } },
+      ],
+    },
     include: { project: true },
     orderBy: { createdAt: "asc" },
     take: 1,
@@ -41,7 +45,12 @@ async function pollForTasks(): Promise<void> {
       data: { status: TaskStatus.IN_PROGRESS, startedAt: new Date(), lastActivityAt: new Date() },
     });
 
-    await processTask(task, task.project);
+    const outcome = await processTask(task, task.project);
+
+    if (outcome === "awaiting_plan_approval") {
+      console.info(`[worker] Task paused for plan approval: ${task.id}`);
+      return;
+    }
 
     await prisma.task.update({
       where: { id: task.id },
