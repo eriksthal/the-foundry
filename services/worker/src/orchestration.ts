@@ -74,7 +74,8 @@ ${task.description}
    - COMPLEX: produce a full plan package and STOP after planning with action AWAIT_PLAN_APPROVAL.
 3. Never ask follow-up questions. Pick the safest reasonable assumption, record it, and continue.
 4. Use subagents intentionally. The planner returns plans, implementers write code, reviewers gate quality.
-5. Return only the required JSON payload.`;
+5. The worker handles push and PR creation after execution. Only include prUrl if you obtained a verified real URL from a tool result. Never invent or guess it.
+6. Return only the required JSON payload.`;
 }
 
 export function buildResumePrompt(task: Task): string {
@@ -148,6 +149,7 @@ function baseInstructions(): string {
 - Never return prose outside the JSON response.
 - Always emit exactly one JSON object inside a \`\`\`json fenced block.
 - Always include: version, scenario, action, phase, classification, finalSummary.
+- Never fabricate repository, branch, commit, or pull request URLs.
 - Scenario values: SMALL | MEDIUM | COMPLEX.
 - Action values:
   - COMPLETE: task execution finished successfully.

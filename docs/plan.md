@@ -275,7 +275,7 @@ jobs:
 |---|------|---------|
 | 2.1 | Execution timeline UI | Visual timeline of tool calls and sub-agent events per task |
 | 2.2 | Agent activity tree | Tree view showing orchestrator → planner → implementer → reviewer flow |
-| 2.3 | PR link integration | Use GitHub MCP server to create PRs, store URL on task |
+| 2.3 | PR link integration | Worker validates/creates PRs via GitHub API, stores URL on task, shows live status in UI |
 | 2.4 | Task feedback form | Rating, what went right/wrong, lessons learned |
 | 2.5 | Memory write pipeline | Human feedback → dedup → project_memory table |
 | 2.6 | Auto-detected memory | Hook-based pattern detection (test failures, common errors) |

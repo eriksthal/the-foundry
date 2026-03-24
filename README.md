@@ -96,7 +96,7 @@ docker compose up -d
 
 # Copy environment variables
 cp .env.example .env
-# Then fill in GITHUB_TOKEN and COPILOT_GITHUB_TOKEN in .env
+# Then fill in GITHUB_TOKEN, COPILOT_GITHUB_TOKEN, and FOUNDRY_APP_URL in .env
 
 # Generate Prisma client and push schema
 npm run db:generate
@@ -128,7 +128,7 @@ npm run dev
 2. **Create a Task** — Describe the work to be done.
 3. **Approve the Task** — Move it from `DRAFT` → `PENDING_APPROVAL` → `APPROVED`.
 4. **Worker executes** — Automatically picks up approved tasks, clones the repo, runs the agent pipeline, and pushes a branch.
-5. **Review results** — View execution logs, tool calls, and the final outcome in the dashboard.
+5. **Review results** — View execution logs, tool calls, PR status, and the final outcome in the dashboard.
 6. **Provide feedback** — Rate the task and record lessons learned for future runs.
 
 ## License

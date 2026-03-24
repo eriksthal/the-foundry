@@ -8,6 +8,7 @@ import {
 } from "@the-foundry/db";
 
 import { requireUser } from "../../../lib/auth";
+import { getPullRequestState } from "../../../lib/github";
 
 export const dynamic = "force-dynamic";
 
@@ -100,6 +101,7 @@ export default async function TaskDetailPage({
 
   const plan = isPlan(task.planContent) ? task.planContent : null;
   const timelineLogs = task.logs.filter((log) => !log.event.startsWith("assistant.message_delta"));
+  const pullRequest = task.prUrl ? await getPullRequestState(task.prUrl) : null;
 
   return (
     <div className="space-y-8">
@@ -207,14 +209,28 @@ export default async function TaskDetailPage({
           <h2 className="mb-2 text-sm font-semibold text-zinc-400">Latest Outcome</h2>
           <p className="whitespace-pre-wrap text-sm">{task.result}</p>
           {task.prUrl && (
-            <a
-              href={task.prUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-2 inline-block text-sm text-blue-400 hover:underline"
-            >
-              View Pull Request &rarr;
-            </a>
+            <div className="mt-3 space-y-2">
+              <a
+                href={task.prUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-block text-sm text-blue-400 hover:underline"
+              >
+                View Pull Request &rarr;
+              </a>
+              {pullRequest && (
+                <div className="rounded border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-300">
+                  <p>
+                    PR #{pullRequest.number} · {pullRequest.merged ? "Merged" : pullRequest.state}
+                  </p>
+                  {pullRequest.mergedAt && (
+                    <p className="mt-1 text-zinc-500">
+                      Merged at {new Date(pullRequest.mergedAt).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}

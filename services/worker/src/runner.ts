@@ -16,6 +16,13 @@ import {
   secrets as dbSecrets,
 } from "@the-foundry/db";
 import { loadAgents } from "./agents/index.js";
+import {
+  ensureCommittedChanges,
+  findOrCreatePullRequest,
+  getGitStatusSummary,
+  parseGitHubRepoUrl,
+  pushBranchToOrigin,
+} from "./github.js";
 import { buildMemoryContext } from "./memory.js";
 import {
   buildInitialTaskPrompt,
@@ -116,12 +123,17 @@ export async function processTask(task: Task, project: Project): Promise<Process
     const response = await sendAndWaitWithSlidingTimeout(session, prompt, task.id);
     const resultContent = response?.data?.content ?? "No response content";
     const parsed = parseOrchestratorResponse(resultContent);
+    const prInfo =
+      parsed.action === "COMPLETE"
+        ? await finalizePullRequest(task, project, workDir, branchName, parsed.prUrl)
+        : null;
 
     const outcome = await applyOrchestrationResult(task.id, parsed, {
       sessionId,
       workspacePath: session.workspacePath,
       workDir,
       branchName,
+      prUrl: prInfo?.url,
       rawContent: resultContent,
     });
 
@@ -136,7 +148,7 @@ export async function processTask(task: Task, project: Project): Promise<Process
       where: { id: task.id },
       data: {
         result: parsed.finalSummary,
-        prUrl: parsed.prUrl ?? undefined,
+        prUrl: prInfo?.url,
         phase: TaskPhase.DONE,
         lastActivityAt: new Date(),
       },
@@ -408,6 +420,7 @@ async function applyOrchestrationResult(
     workspacePath?: string;
     workDir: string;
     branchName: string;
+    prUrl?: string;
     rawContent: string;
   },
 ): Promise<ProcessTaskOutcome> {
@@ -428,7 +441,7 @@ async function applyOrchestrationResult(
     planApprovalStatus: PlanApprovalStatus[planApprovalStatus],
     planContent: response.plan ? JSON.parse(JSON.stringify(response.plan)) : undefined,
     result: response.finalSummary,
-    prUrl: response.prUrl ?? undefined,
+    prUrl: context.prUrl,
     copilotSessionId: context.sessionId,
     copilotWorkspacePath: context.workspacePath ?? undefined,
     workingDirectory: context.workDir,
@@ -555,10 +568,8 @@ async function createLog(
 
 function parseGitUrl(url: string): { owner?: string; name?: string } {
   if (!url) return {};
-  const sshMatch = url.match(/^[^:]+:([^/]+)\/(.+?)($|\.git$)/);
-  if (sshMatch) return { owner: sshMatch[1], name: sshMatch[2]?.replace(/\.git$/, "") };
-  const httpsMatch = url.match(/github.com\/(.+?)\/(.+?)(?:$|\.git)/);
-  if (httpsMatch) return { owner: httpsMatch[1], name: httpsMatch[2]?.replace(/\.git$/, "") };
+  const repo = parseGitHubRepoUrl(url);
+  if (repo) return { owner: repo.owner, name: repo.repo };
   return {};
 }
 
@@ -576,4 +587,112 @@ function logTokenPresence(): void {
     "value:",
     mask(process.env.COPILOT_GITHUB_TOKEN),
   );
+}
+
+async function finalizePullRequest(
+  task: Task,
+  project: Project,
+  workDir: string,
+  branchName: string,
+  reportedPrUrl?: string,
+): Promise<{ url: string } | null> {
+  const githubToken = process.env.GITHUB_TOKEN?.trim();
+  const repoRef = parseGitHubRepoUrl(project.repoUrl);
+
+  if (!githubToken) {
+    await createLog(task.id, {
+      event: "pr.skipped",
+      phase: TaskPhase.CREATE_PR,
+      result: "Missing GITHUB_TOKEN; skipping PR creation.",
+    });
+    return null;
+  }
+
+  if (!repoRef) {
+    await createLog(task.id, {
+      event: "pr.skipped",
+      phase: TaskPhase.CREATE_PR,
+      result: `Unsupported repository URL: ${project.repoUrl}`,
+    });
+    return null;
+  }
+
+  const hadLocalChanges = ensureCommittedChanges(workDir, task.title);
+  if (hadLocalChanges) {
+    await createLog(task.id, {
+      event: "git.commit",
+      phase: TaskPhase.CREATE_PR,
+      result: `Committed local changes on ${branchName}.`,
+    });
+  }
+
+  const gitStatus = getGitStatusSummary(workDir);
+  const needsPush = hadLocalChanges || gitStatus.commitsAheadOfBase > 0 || !gitStatus.branchExistsOnRemote;
+
+  if (!needsPush) {
+    const existingPr = await findOrCreatePullRequest({
+      task,
+      project,
+      branchName,
+      reportedPrUrl,
+    });
+
+    if (existingPr && reportedPrUrl && existingPr.url !== reportedPrUrl) {
+      await createLog(task.id, {
+        event: "pr.reported_url_mismatch",
+        phase: TaskPhase.CREATE_PR,
+        result: `Ignoring reported PR URL ${reportedPrUrl} in favor of ${existingPr.url}.`,
+      });
+    }
+
+    if (existingPr) {
+      await createLog(task.id, {
+        event: "pr.synced",
+        phase: TaskPhase.CREATE_PR,
+        result: existingPr.url,
+      });
+      return { url: existingPr.url };
+    }
+
+    return null;
+  }
+
+  pushBranchToOrigin(workDir, branchName, githubToken);
+  await createLog(task.id, {
+    event: "git.push",
+    phase: TaskPhase.CREATE_PR,
+    result: `Pushed branch ${branchName} to origin.`,
+  });
+
+  const pr = await findOrCreatePullRequest({
+    task,
+    project,
+    branchName,
+    reportedPrUrl,
+  });
+
+  if (!pr) {
+    await createLog(task.id, {
+      event: "pr.unavailable",
+      phase: TaskPhase.CREATE_PR,
+      result: "Push succeeded but no PR could be found or created.",
+    });
+    return null;
+  }
+
+  if (reportedPrUrl && pr.url !== reportedPrUrl) {
+    await createLog(task.id, {
+      event: "pr.reported_url_mismatch",
+      phase: TaskPhase.CREATE_PR,
+      result: `Ignoring reported PR URL ${reportedPrUrl} in favor of ${pr.url}.`,
+    });
+  }
+
+  await createLog(task.id, {
+    event: "pr.synced",
+    phase: TaskPhase.CREATE_PR,
+    result: pr.url,
+  });
+
+  return { url: pr.url };
 }
