@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import {
-  PlanApprovalStatus,
   prisma,
+  type TaskStatus,
+} from "@the-foundry/db";
+import type {
+  PlanApprovalStatus,
   TaskPhase,
   TaskScenario,
-  type TaskStatus,
 } from "@the-foundry/db";
 import { requireApiUser, unauthorizedJson } from "../../../../lib/auth";
 
