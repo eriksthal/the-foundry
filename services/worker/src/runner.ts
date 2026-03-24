@@ -33,18 +33,17 @@ import {
 } from "./orchestration.js";
 
 export type ProcessTaskOutcome = "completed" | "awaiting_plan_approval";
+type ExecutionMode = "fresh" | "resume_approved_plan" | "restart_from_approved_plan";
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.WORKER_SESSION_TIMEOUT_MS) || 1_800_000;
 
 export async function processTask(task: Task, project: Project): Promise<ProcessTaskOutcome> {
-  const isResume =
-    task.phase === TaskPhase.WAITING_FOR_PLAN_APPROVAL &&
-    task.planApprovalStatus === PlanApprovalStatus.APPROVED &&
-    Boolean(task.copilotSessionId) &&
-    Boolean(task.workingDirectory);
-  const workDir = isResume
-    ? task.workingDirectory!
-    : mkdtempSync(join(tmpdir(), `foundry-${task.id}-`));
+  const executionMode = determineExecutionMode(task);
+  let activeWorkDir =
+    executionMode === "resume_approved_plan"
+      ? task.workingDirectory!
+      : mkdtempSync(join(tmpdir(), `foundry-${task.id}-`));
+  let activeExecutionMode = executionMode;
 
   let preserveWorkDir = false;
   const client = new CopilotClient();
@@ -53,31 +52,22 @@ export async function processTask(task: Task, project: Project): Promise<Process
     logTokenPresence();
 
     let branchName = task.branch ?? `foundry/task-${task.id.slice(0, 8)}`;
-    const sessionId = task.copilotSessionId ?? randomUUID();
+    const initialSessionId =
+      executionMode === "resume_approved_plan" && task.copilotSessionId
+        ? task.copilotSessionId
+        : randomUUID();
 
-    if (!isResume) {
-      await prepareRepository(task, project, workDir, branchName);
-    } else {
-      console.info(`[runner] Resuming task ${task.id} in ${workDir}`);
-      await prisma.task.update({
-        where: { id: task.id },
-        data: {
-          status: TaskStatus.IN_PROGRESS,
-          phase: TaskPhase.IMPLEMENT,
-          lastActivityAt: new Date(),
-        },
-      });
-    }
+    await prepareTaskWorkspace(task, project, activeWorkDir, branchName, executionMode);
 
     const customAgents = loadAgents();
     const memoryContext = await buildMemoryContext(project.id);
     const hooks = buildHooks(task.id);
     const sessionConfig = {
-      sessionId,
+      sessionId: initialSessionId,
       model: "gpt-4.1",
       agent: "orchestrator",
       customAgents,
-      workingDirectory: workDir,
+      workingDirectory: activeWorkDir,
       streaming: true,
       infiniteSessions: { enabled: true },
       hooks,
@@ -87,37 +77,37 @@ export async function processTask(task: Task, project: Project): Promise<Process
       },
     };
 
-    const session = isResume
-      ? await client.resumeSession(task.copilotSessionId!, sessionConfig)
-      : await client.createSession({
-          ...sessionConfig,
-          hooks: {
-            ...hooks,
-            onSessionStart: async () => ({
-              additionalContext: [
-                `Repository: ${project.repoUrl}`,
-                `Branch: ${branchName}`,
-                `Working directory: ${workDir}`,
-                memoryContext,
-              ]
-                .filter(Boolean)
-                .join("\n\n"),
-            }),
-          },
-        });
+    const sessionState = await createCopilotSession(client, {
+      task,
+      project,
+      branchName,
+      workDir: activeWorkDir,
+      memoryContext,
+      sessionId: initialSessionId,
+      sessionConfig,
+      executionMode,
+    });
+    const { session } = sessionState;
+    activeWorkDir = sessionState.workDir;
+    activeExecutionMode = sessionState.executionMode;
 
     await prisma.task.update({
       where: { id: task.id },
       data: {
         branch: branchName,
-        copilotSessionId: sessionId,
+        copilotSessionId: sessionState.sessionId,
         copilotWorkspacePath:
-          task.copilotWorkspacePath ?? session.workspacePath ?? undefined,
-        workingDirectory: workDir,
+          activeExecutionMode === "resume_approved_plan"
+            ? task.copilotWorkspacePath ?? session.workspacePath ?? undefined
+            : session.workspacePath ?? task.copilotWorkspacePath ?? undefined,
+        workingDirectory: activeWorkDir,
       },
     });
 
-    const prompt = isResume ? buildResumePrompt(task) : buildInitialTaskPrompt(task, branchName);
+    const prompt =
+      activeExecutionMode === "fresh"
+        ? buildInitialTaskPrompt(task, branchName)
+        : buildResumePrompt(task);
     console.info(`[runner] Sending prompt to Copilot for task ${task.id}`);
 
     const response = await sendAndWaitWithSlidingTimeout(session, prompt, task.id);
@@ -125,7 +115,7 @@ export async function processTask(task: Task, project: Project): Promise<Process
     const parsed = parseOrchestratorResponse(resultContent);
     const prInfo =
       parsed.action === "COMPLETE"
-        ? await finalizePullRequest(task, project, workDir, branchName, parsed.prUrl)
+        ? await finalizePullRequest(task, project, activeWorkDir, branchName, parsed.prUrl)
         : null;
 
     if (parsed.action === "COMPLETE" && isPullRequestRequired() && !prInfo?.url) {
@@ -133,9 +123,9 @@ export async function processTask(task: Task, project: Project): Promise<Process
     }
 
     const outcome = await applyOrchestrationResult(task.id, parsed, {
-      sessionId,
+      sessionId: sessionState.sessionId,
       workspacePath: session.workspacePath,
-      workDir,
+      workDir: activeWorkDir,
       branchName,
       prUrl: prInfo?.url,
       rawContent: resultContent,
@@ -165,9 +155,9 @@ export async function processTask(task: Task, project: Project): Promise<Process
   } finally {
     if (!preserveWorkDir) {
       try {
-        rmSync(workDir, { recursive: true, force: true });
+        rmSync(activeWorkDir, { recursive: true, force: true });
       } catch {
-        console.warn(`[runner] Failed to clean up ${workDir}`);
+        console.warn(`[runner] Failed to clean up ${activeWorkDir}`);
       }
     }
   }
@@ -178,6 +168,10 @@ async function prepareRepository(
   project: Project,
   workDir: string,
   branchName: string,
+  options?: {
+    phase?: TaskPhase;
+    planApprovalStatus?: PlanApprovalStatus;
+  },
 ): Promise<void> {
   console.info(`[runner] Cloning ${project.repoUrl} into ${workDir}`);
   try {
@@ -200,8 +194,8 @@ async function prepareRepository(
     where: { id: task.id },
     data: {
       branch: branchName,
-      phase: TaskPhase.CLASSIFY,
-      planApprovalStatus: PlanApprovalStatus.NOT_REQUIRED,
+      phase: options?.phase ?? TaskPhase.CLASSIFY,
+      planApprovalStatus: options?.planApprovalStatus ?? PlanApprovalStatus.NOT_REQUIRED,
       lastActivityAt: new Date(),
       workingDirectory: workDir,
     },
@@ -591,6 +585,176 @@ function logTokenPresence(): void {
     "value:",
     mask(process.env.COPILOT_GITHUB_TOKEN),
   );
+}
+
+function determineExecutionMode(task: Task): ExecutionMode {
+  const approvedPlanReady =
+    task.phase === TaskPhase.WAITING_FOR_PLAN_APPROVAL &&
+    task.planApprovalStatus === PlanApprovalStatus.APPROVED;
+
+  if (!approvedPlanReady) return "fresh";
+
+  if (task.copilotSessionId && task.workingDirectory) return "resume_approved_plan";
+
+  return "restart_from_approved_plan";
+}
+
+async function prepareTaskWorkspace(
+  task: Task,
+  project: Project,
+  workDir: string,
+  branchName: string,
+  executionMode: ExecutionMode,
+): Promise<void> {
+  if (executionMode === "resume_approved_plan") {
+    console.info(`[runner] Resuming approved plan for task ${task.id} in ${workDir}`);
+    await createLog(task.id, {
+      event: "plan.resume",
+      phase: TaskPhase.IMPLEMENT,
+      result: `Resuming approved plan in existing workspace ${workDir}.`,
+    });
+    await prisma.task.update({
+      where: { id: task.id },
+      data: {
+        status: TaskStatus.IN_PROGRESS,
+        phase: TaskPhase.IMPLEMENT,
+        errorLog: null,
+        lastActivityAt: new Date(),
+      },
+    });
+    return;
+  }
+
+  if (executionMode === "restart_from_approved_plan") {
+    console.info(`[runner] Restarting approved plan for task ${task.id} with a fresh workspace`);
+    await createLog(task.id, {
+      event: "plan.resume_fallback",
+      phase: TaskPhase.IMPLEMENT,
+      result:
+        "Previous approved-plan session could not be resumed. Starting a fresh session with the approved plan.",
+    });
+    await prisma.task.update({
+      where: { id: task.id },
+      data: {
+        status: TaskStatus.IN_PROGRESS,
+        phase: TaskPhase.IMPLEMENT,
+        errorLog: null,
+        lastActivityAt: new Date(),
+      },
+    });
+    await prepareRepository(task, project, workDir, branchName, {
+      phase: TaskPhase.IMPLEMENT,
+      planApprovalStatus: PlanApprovalStatus.APPROVED,
+    });
+    return;
+  }
+
+  await prepareRepository(task, project, workDir, branchName);
+}
+
+async function createCopilotSession(
+  client: CopilotClient,
+  params: {
+    task: Task;
+    project: Project;
+    branchName: string;
+    workDir: string;
+    memoryContext: string;
+    sessionId: string;
+    sessionConfig: {
+      sessionId: string;
+      model: string;
+      agent: string;
+      customAgents: ReturnType<typeof loadAgents>;
+      workingDirectory: string;
+      streaming: boolean;
+      infiniteSessions: { enabled: boolean };
+      hooks: ReturnType<typeof buildHooks>;
+      onPermissionRequest: () => Promise<{ kind: "approved" }>;
+      onEvent: (event: { type: string; data?: Record<string, unknown> }) => void;
+    };
+    executionMode: ExecutionMode;
+  },
+): Promise<{
+  session: Awaited<ReturnType<CopilotClient["createSession"]>>;
+  sessionId: string;
+  workDir: string;
+  executionMode: ExecutionMode;
+}> {
+  const { task, project, branchName, workDir, memoryContext, sessionId, sessionConfig, executionMode } =
+    params;
+
+  if (executionMode === "resume_approved_plan" && task.copilotSessionId) {
+    try {
+      const session = await client.resumeSession(task.copilotSessionId, sessionConfig);
+      return {
+        session,
+        sessionId: task.copilotSessionId,
+        workDir,
+        executionMode,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await createLog(task.id, {
+        event: "plan.resume_failed",
+        phase: TaskPhase.IMPLEMENT,
+        result: `Could not resume prior approved-plan session. ${message}`,
+      });
+
+      const fallbackWorkDir = mkdtempSync(join(tmpdir(), `foundry-${task.id}-resume-fallback-`));
+      await prepareTaskWorkspace(task, project, fallbackWorkDir, branchName, "restart_from_approved_plan");
+      const fallbackSessionId = randomUUID();
+
+      const session = await client.createSession({
+        ...sessionConfig,
+        sessionId: fallbackSessionId,
+        workingDirectory: fallbackWorkDir,
+        hooks: {
+          ...sessionConfig.hooks,
+          onSessionStart: async () => ({
+            additionalContext: [
+              `Repository: ${project.repoUrl}`,
+              `Branch: ${branchName}`,
+              `Working directory: ${fallbackWorkDir}`,
+              memoryContext,
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+          }),
+        },
+      });
+      return {
+        session,
+        sessionId: fallbackSessionId,
+        workDir: fallbackWorkDir,
+        executionMode: "restart_from_approved_plan",
+      };
+    }
+  }
+
+  const session = await client.createSession({
+    ...sessionConfig,
+    sessionId,
+    hooks: {
+      ...sessionConfig.hooks,
+      onSessionStart: async () => ({
+        additionalContext: [
+          `Repository: ${project.repoUrl}`,
+          `Branch: ${branchName}`,
+          `Working directory: ${workDir}`,
+          memoryContext,
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+      }),
+    },
+  });
+  return {
+    session,
+    sessionId,
+    workDir,
+    executionMode,
+  };
 }
 
 async function finalizePullRequest(
