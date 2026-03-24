@@ -311,15 +311,21 @@ async function injectSecrets(taskId: string, repoUrl: string, workDir: string): 
     const repoTemplate = join(workDir, ".env.template");
 
     let secretsContent: string | undefined;
+    let secretSource: string | undefined;
 
     try {
       if (owner && name) {
         const secret = await dbSecrets.getDecryptedSecret(owner, name);
         if (secret) {
           secretsContent = secret;
+          secretSource = `db:${owner}/${name}`;
           await createLog(taskId, {
             event: "secrets_injection",
-            result: `loaded:db:${owner}/${name}`,
+            result: `loaded:${secretSource}`,
+            payload: {
+              source: secretSource,
+              keys: extractEnvKeys(secret),
+            },
           });
         }
       }
@@ -330,9 +336,14 @@ async function injectSecrets(taskId: string, repoUrl: string, workDir: string): 
     for (const candidate of candidatePaths) {
       if (!candidate || !existsSync(candidate)) continue;
       secretsContent = readFileSync(candidate, "utf8");
+      secretSource = candidate;
       await createLog(taskId, {
         event: "secrets_injection",
         result: `loaded:${candidate}`,
+        payload: {
+          source: candidate,
+          keys: extractEnvKeys(secretsContent),
+        },
       });
       break;
     }
@@ -359,13 +370,37 @@ async function injectSecrets(taskId: string, repoUrl: string, workDir: string): 
     }
 
     writeFileSync(outPath, secretsContent, "utf8");
-    await createLog(taskId, { event: "secrets_injection", result: "wrote:.env" });
+    await createLog(taskId, {
+      event: "secrets_injection",
+      result: "wrote:.env",
+      payload: {
+        source: secretSource ?? "unknown",
+        path: ".env",
+        keys: extractEnvKeys(secretsContent),
+      },
+    });
   } catch (e) {
     console.warn(
       "[runner] Secrets injection step failed:",
       e instanceof Error ? e.message : String(e),
     );
   }
+}
+
+function extractEnvKeys(envContent: string): string[] {
+  return Array.from(
+    new Set(
+      envContent
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#"))
+        .map((line) => {
+          const withoutExport = line.startsWith("export ") ? line.slice("export ".length) : line;
+          return withoutExport.split("=")[0]?.trim();
+        })
+        .filter((key): key is string => Boolean(key)),
+    ),
+  );
 }
 
 function buildHooks(taskId: string, evidence: ExecutionEvidence) {
