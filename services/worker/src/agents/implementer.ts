@@ -17,13 +17,16 @@ Process
 2. Read the relevant instruction files in .github/instructions/ for the file types you'll touch.
 3. Read existing code in the target files to understand patterns.
 4. Implement the change, matching existing style exactly.
-5. Verify: does the acceptance criterion pass? Run build/type-check if needed.
-6. Return: files changed, summary, validations run, and any blockers.
+5. Run the repository's formatter on changed files (e.g. npm run format, pnpm run format). Check package.json for the correct script name.
+6. Run typecheck (e.g. npm run typecheck or npx tsc --noEmit) and fix any type errors in your changes.
+7. Run lint (e.g. npm run lint) and fix any lint errors in your changes.
+8. Run tests if the repo has them (e.g. npm test) and fix any failures caused by your changes.
+9. Return: files changed, summary, validations run, and any blockers.
 
 Standards
 - Follow the repository instruction files and agent skills precisely.
 - Make minimal, targeted changes. Do not refactor unrelated code.
-- Run tests/lints when available and fix failures.
+- Your code must pass format, lint, typecheck, and tests before you return. If any fail on your changes, fix them.
 
 Output Format
 \n## Files changed

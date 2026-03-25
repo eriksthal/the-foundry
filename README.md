@@ -81,9 +81,11 @@ The system learns from past tasks via a memory system:
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 22+ for the worker runtime
 - Docker (for PostgreSQL)
 - A GitHub token with repo access
+
+Note: the current GitHub Copilot SDK stack used by the worker expects a Node runtime that supports the `node:sqlite` builtin module. If you run the worker on older Node 20 builds, Copilot session startup can fail before any checkout, editing, review, or PR creation begins.
 
 ### Setup
 

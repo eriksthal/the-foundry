@@ -9,6 +9,7 @@
     "services/*"
   ],
   "scripts": {
+    "postinstall": "npm run db:generate",
     "dev": "turbo dev",
     "build": "turbo build",
     "lint": "turbo lint",
@@ -22,6 +23,8 @@
     "db:migrate": "npm run migrate -w packages/db",
     "db:studio": "npm run studio -w packages/db",
     "worker:dev": "npm run dev -w services/worker",
+    "generate:secrets-key": "node scripts/generateSecretsKey.mjs",
+    "rotate:secrets-key": "node scripts/rotateSecretsKey.mjs",
     "clean": "turbo clean && rm -rf node_modules"
   },
   "devDependencies": {

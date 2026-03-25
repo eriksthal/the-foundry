@@ -1,3 +1,7 @@
+import { loadRootEnv } from "./load-root-env";
+
+loadRootEnv();
+
 export type PullRequestState = {
   number: number;
   title: string;
@@ -58,6 +62,63 @@ function parsePullRequestUrl(url: string): { owner: string; repo: string; number
       repo: match[2]!,
       number: Number(match[3]!),
     };
+  } catch {
+    return null;
+  }
+}
+
+// ─── GitHub Models Catalog ──────────────────────────────
+
+export type GitHubModel = {
+  id: string;
+  label: string;
+  description: string;
+  publisher: string;
+};
+
+let cachedModels: GitHubModel[] | null = null;
+let cacheTimestamp = 0;
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+export async function getGitHubModels(): Promise<GitHubModel[] | null> {
+  const token = process.env.COPILOT_GITHUB_TOKEN?.trim();
+  if (!token) return null;
+
+  if (cachedModels && Date.now() - cacheTimestamp < CACHE_TTL_MS) {
+    return cachedModels;
+  }
+
+  try {
+    const response = await fetch("https://models.github.ai/catalog/models", {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`,
+        "User-Agent": "the-foundry-web",
+      },
+      cache: "no-store",
+    });
+
+    if (!response.ok) return null;
+
+    const payload = (await response.json()) as Array<Record<string, unknown>>;
+    if (!Array.isArray(payload)) return null;
+
+    const models: GitHubModel[] = payload
+      .filter((m) => {
+        const capabilities = m.capabilities as string[] | undefined;
+        return Array.isArray(capabilities) && capabilities.includes("agents");
+      })
+      .map((m) => ({
+        id: String(m.id ?? "").replace(/^[^/]+\//, ""),
+        label: String(m.name ?? ""),
+        description: String(m.summary ?? "").slice(0, 80),
+        publisher: String(m.publisher ?? ""),
+      }))
+      .filter((m) => m.id && m.label);
+
+    cachedModels = models;
+    cacheTimestamp = Date.now();
+    return models;
   } catch {
     return null;
   }

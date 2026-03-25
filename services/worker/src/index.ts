@@ -74,6 +74,8 @@ async function pollForTasks(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  await verifyCopilotRuntimePrerequisites();
+
   console.info("[worker] The Foundry worker started");
   console.info(`[worker] Polling every ${POLL_INTERVAL_MS / 1000}s`);
 
@@ -91,3 +93,15 @@ main().catch((err) => {
   console.error("[worker] Fatal error:", err);
   process.exit(1);
 });
+
+async function verifyCopilotRuntimePrerequisites(): Promise<void> {
+  try {
+    await import("node:sqlite");
+  } catch {
+    const message =
+      `The worker runtime does not support "node:sqlite" on Node ${process.version}. ` +
+      `The installed Copilot stack requires a Node build that includes this builtin module. ` +
+      `Upgrade the worker runtime to a newer Node version (recommended: Node 22+) and restart the worker.`;
+    throw new Error(message);
+  }
+}

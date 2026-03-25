@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { TaskPhase, TaskScenario } from "@the-foundry/db";
+import { TaskScenario } from "@the-foundry/db";
 import {
   parseOrchestratorResponse,
+  phaseFromAction,
   planApprovalStatusForScenario,
 } from "./orchestration.js";
 
@@ -13,13 +14,9 @@ describe("parseOrchestratorResponse", () => {
   "version": 1,
   "scenario": "MEDIUM",
   "action": "COMPLETE",
-  "phase": "DONE",
   "classification": {
     "size": "MEDIUM",
-    "reason": "Touches multiple files but is straightforward.",
-    "riskLevel": "medium",
-    "estimatedTracks": 2,
-    "needsHumanPlanApproval": false
+    "reason": "Touches multiple files but is straightforward."
   },
   "plan": {
     "summary": "Implement and verify the feature."
@@ -30,8 +27,6 @@ describe("parseOrchestratorResponse", () => {
 `);
 
     expect(result.scenario).toBe(TaskScenario.MEDIUM);
-    expect(result.phase).toBe(TaskPhase.DONE);
-    expect(result.classification.estimatedTracks).toBe(2);
     expect(result.plan?.summary).toBe("Implement and verify the feature.");
   });
 
@@ -47,13 +42,9 @@ describe("parseOrchestratorResponse", () => {
         "version": 1,
         "scenario": "MEDIUM",
         "action": "PLAN",
-        "phase": "PLAN",
         "classification": {
           "size": "MEDIUM",
-          "reason": "reason",
-          "riskLevel": "medium",
-          "estimatedTracks": 1,
-          "needsHumanPlanApproval": false
+          "reason": "reason"
         },
         "finalSummary": "summary"
       }`),
@@ -72,5 +63,19 @@ describe("planApprovalStatusForScenario", () => {
     expect(planApprovalStatusForScenario("MEDIUM", "COMPLETE")).toBe(
       "NOT_REQUIRED",
     );
+  });
+});
+
+describe("phaseFromAction", () => {
+  it("maps COMPLETE to DONE", () => {
+    expect(phaseFromAction("COMPLETE")).toBe("DONE");
+  });
+
+  it("maps AWAIT_PLAN_APPROVAL to WAITING_FOR_PLAN_APPROVAL", () => {
+    expect(phaseFromAction("AWAIT_PLAN_APPROVAL")).toBe("WAITING_FOR_PLAN_APPROVAL");
+  });
+
+  it("maps FAIL to FAILED", () => {
+    expect(phaseFromAction("FAIL")).toBe("FAILED");
   });
 });

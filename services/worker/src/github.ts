@@ -127,7 +127,11 @@ async function findPullRequestByHead(params: {
 }): Promise<PullRequestInfo | null> {
   const url = `https://api.github.com/repos/${params.repo.owner}/${params.repo.repo}/pulls?head=${encodeURIComponent(`${params.repo.owner}:${params.branchName}`)}&state=all`;
   const response = await githubRequest(url, params.token);
-  if (!response.ok) return null;
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    console.warn(`[github] Failed to list PRs (${response.status}): ${body.slice(0, 500)}`);
+    return null;
+  }
 
   const pulls = (await response.json()) as Array<Record<string, unknown>>;
   const first = pulls[0];
@@ -156,7 +160,11 @@ async function createPullRequest(params: {
     },
   );
 
-  if (!response.ok) return null;
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    console.error(`[github] Failed to create PR (${response.status}): ${body.slice(0, 500)}`);
+    return null;
+  }
 
   const payload = (await response.json()) as Record<string, unknown>;
   return toPullRequestInfo(payload);

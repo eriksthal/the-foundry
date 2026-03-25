@@ -1,8 +1,9 @@
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
-import { prisma, TaskStatus } from "@the-foundry/db";
+import { prisma, TaskStatus, SUPPORTED_MODELS, DEFAULT_MODEL } from "@the-foundry/db";
 
 import { requireUser } from "../../../lib/auth";
+import { getGitHubModels } from "../../../lib/github";
 import { SecretsSection } from "./SecretsSection";
 
 export const dynamic = "force-dynamic";
@@ -34,11 +35,21 @@ export default async function ProjectDetailPage({
 
   if (!project) notFound();
 
+  const catalogModels = await getGitHubModels();
+  const COPILOT_ONLY_MODELS = SUPPORTED_MODELS.filter(
+    (m) => m.id.startsWith("claude-") || m.id.startsWith("gemini-"),
+  );
+  const availableModels = catalogModels
+    ? [...COPILOT_ONLY_MODELS, ...catalogModels.filter((m) => !COPILOT_ONLY_MODELS.some((s) => s.id === m.id))]
+    : [...SUPPORTED_MODELS];
+
   async function createTask(formData: FormData) {
     "use server";
     await requireUser(`/projects/${id}`);
     const title = formData.get("title") as string;
     const description = formData.get("description") as string;
+    const modelInput = String(formData.get("model") ?? "");
+    const model = modelInput.length > 0 && modelInput.length <= 100 ? modelInput : DEFAULT_MODEL;
 
     if (!title?.trim() || !description?.trim()) {
       throw new Error("Title and description are required");
@@ -50,6 +61,7 @@ export default async function ProjectDetailPage({
         title: title.trim(),
         description: description.trim(),
         status: TaskStatus.DRAFT,
+        model,
       },
     });
 
@@ -108,6 +120,23 @@ export default async function ProjectDetailPage({
             placeholder="Describe what the agent should do. Be specific about the expected changes, files involved, and success criteria."
             className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm placeholder-zinc-500 focus:border-blue-500 focus:outline-none"
           />
+          <div>
+            <label htmlFor="model" className="mb-1 block text-xs text-zinc-400">
+              Model
+            </label>
+            <select
+              name="model"
+              id="model"
+              defaultValue={DEFAULT_MODEL}
+              className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-blue-500 focus:outline-none"
+            >
+              {availableModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label} — {m.description}
+                </option>
+              ))}
+            </select>
+          </div>
           <button
             type="submit"
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm hover:bg-blue-500"

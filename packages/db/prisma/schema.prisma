@@ -58,6 +58,17 @@ enum MemorySource {
   MANUAL
 }
 
+enum ActivityType {
+  PHASE_CHANGE
+  SUBAGENT_STARTED
+  SUBAGENT_COMPLETED
+  PLAN_GENERATED
+  REVIEW_COMPLETED
+  CI_CHECK
+  ERROR
+  TASK_SUMMARY
+}
+
 // ─── Models ─────────────────────────────────────────────
 
 model Project {
@@ -80,12 +91,11 @@ model Task {
   projectId   String     @map("project_id")
   title       String
   description String
+  model       String     @default("claude-sonnet-4.6")
   status      TaskStatus @default(DRAFT)
   scenario    TaskScenario?
   phase       TaskPhase?
   classificationReason String? @map("classification_reason")
-  riskLevel   String?    @map("risk_level")
-  estimatedTracks Int?   @map("estimated_tracks")
   planApprovalStatus PlanApprovalStatus @default(NOT_REQUIRED) @map("plan_approval_status")
   planContent Json?      @map("plan_content")
   copilotSessionId String? @map("copilot_session_id")
@@ -104,6 +114,7 @@ model Task {
   project     Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
   logs        ExecutionLog[]
   feedback    TaskFeedback[]
+  activities  TaskActivity[]
 
   @@index([status])
   @@index([projectId])
@@ -126,6 +137,22 @@ model ExecutionLog {
 
   @@index([taskId])
   @@map("execution_logs")
+}
+
+model TaskActivity {
+  id         String       @id @default(uuid())
+  taskId     String       @map("task_id")
+  type       ActivityType
+  title      String
+  summary    String?
+  metadata   Json?
+  durationMs Int?         @map("duration_ms")
+  createdAt  DateTime     @default(now()) @map("created_at")
+
+  task       Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, createdAt])
+  @@map("task_activities")
 }
 
 model ProjectMemory {

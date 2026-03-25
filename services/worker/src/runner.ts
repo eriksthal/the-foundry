@@ -28,9 +28,11 @@ import {
   buildInitialTaskPrompt,
   buildResumePrompt,
   parseOrchestratorResponse,
+  phaseFromAction,
   planApprovalStatusForScenario,
   type OrchestratorResponse,
 } from "./orchestration.js";
+import { ActivityEmitter } from "./activity.js";
 
 export type ProcessTaskOutcome = "completed" | "awaiting_plan_approval";
 type ExecutionMode = "fresh" | "resume_approved_plan" | "restart_from_approved_plan";
@@ -43,6 +45,19 @@ type ExecutionEvidence = {
   reviewCompleted: boolean;
 };
 
+type PromptUsage = {
+  topLevelPromptsSent: number;
+  subagentStarts: number;
+  assistantUsageEvents: number;
+};
+
+class RepoSetupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RepoSetupError";
+  }
+}
+
 const DEFAULT_TIMEOUT_MS = Number(process.env.WORKER_SESSION_TIMEOUT_MS) || 1_800_000;
 export async function processTask(task: Task, project: Project): Promise<ProcessTaskOutcome> {
   const executionMode = determineExecutionMode(task);
@@ -54,9 +69,12 @@ export async function processTask(task: Task, project: Project): Promise<Process
 
   let preserveWorkDir = false;
   const client = new CopilotClient();
+  const activity = new ActivityEmitter(task.id);
+  let session: Awaited<ReturnType<CopilotClient["createSession"]>> | null = null;
 
   try {
     logTokenPresence();
+    await activity.emitPhaseChange("Task execution started");
 
     let branchName = task.branch ?? `foundry/task-${task.id.slice(0, 8)}`;
     const initialSessionId =
@@ -69,10 +87,12 @@ export async function processTask(task: Task, project: Project): Promise<Process
     const customAgents = loadAgents();
     const memoryContext = await buildMemoryContext(project.id);
     const evidence = createExecutionEvidence();
+    const promptUsage = createPromptUsage();
     const hooks = buildHooks(task.id, evidence);
     const sessionConfig = {
       sessionId: initialSessionId,
-      model: "gpt-4.1",
+      model: task.model,
+      agent: "orchestrator",
       customAgents,
       workingDirectory: activeWorkDir,
       streaming: true,
@@ -80,7 +100,7 @@ export async function processTask(task: Task, project: Project): Promise<Process
       hooks,
       onPermissionRequest: async () => ({ kind: "approved" as const }),
       onEvent: (event: { type: string; data?: Record<string, unknown> }) => {
-        void persistSessionEvent(task.id, event);
+        void persistSessionEvent(task.id, event, promptUsage, activity);
       },
     };
 
@@ -94,7 +114,7 @@ export async function processTask(task: Task, project: Project): Promise<Process
       sessionConfig,
       executionMode,
     });
-    const { session } = sessionState;
+    session = sessionState.session;
     activeWorkDir = sessionState.workDir;
     activeExecutionMode = sessionState.executionMode;
 
@@ -123,12 +143,16 @@ export async function processTask(task: Task, project: Project): Promise<Process
       project,
       prompt,
       evidence,
+      promptUsage,
       workDir: activeWorkDir,
     });
     const { parsed, resultContent, evidenceFailureReason } = executionResult;
+    if (parsed.action === "COMPLETE") {
+      await activity.emitPhaseChange("Creating pull request");
+    }
     const prInfo =
       parsed.action === "COMPLETE"
-        ? await finalizePullRequest(task, project, activeWorkDir, branchName, parsed.prUrl)
+        ? await finalizePullRequest(task, project, activeWorkDir, branchName, undefined)
         : null;
 
     if (parsed.action === "COMPLETE" && isPullRequestRequired() && !prInfo?.url) {
@@ -146,11 +170,13 @@ export async function processTask(task: Task, project: Project): Promise<Process
       branchName,
       prUrl: prInfo?.url,
       rawContent: resultContent,
+      activity,
     });
 
     if (outcome === "awaiting_plan_approval") {
       preserveWorkDir = true;
       await session.disconnect();
+      session = null; // Prevent finally from double-disconnecting
       await client.stop();
       return outcome;
     }
@@ -165,12 +191,26 @@ export async function processTask(task: Task, project: Project): Promise<Process
       },
     });
 
-    await client.stop();
+    await activity.emitTaskSummary(parsed.finalSummary);
 
     console.info(`[runner] Task ${task.id} completed. Branch: ${branchName}`);
     return "completed";
+  } catch (error) {
+    await activity.emitError(error instanceof Error ? error.message : String(error));
+    throw error;
   } finally {
+    // Always disconnect session and stop client to prevent leaked SDK processes
+    try {
+      if (session) await session.disconnect();
+    } catch {
+      console.warn(`[runner] Failed to disconnect session for task ${task.id}`);
+    }
     if (!preserveWorkDir) {
+      try {
+        await client.stop();
+      } catch {
+        console.warn(`[runner] Failed to stop client for task ${task.id}`);
+      }
       try {
         rmSync(activeWorkDir, { recursive: true, force: true });
       } catch {
@@ -218,78 +258,137 @@ async function prepareRepository(
     },
   });
 
-  await setupRepository(task.id, workDir);
   await injectSecrets(task.id, project.repoUrl, workDir);
+  await setupRepository(task.id, workDir);
 }
 
 async function setupRepository(taskId: string, workDir: string): Promise<void> {
+  const pkgPath = join(workDir, "package.json");
+  if (!existsSync(pkgPath)) {
+    console.info("[runner] No package.json found; skipping dependency install.");
+    return;
+  }
+
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+  const hasPnpm = existsSync(join(workDir, "pnpm-lock.yaml"));
+  const hasYarn = existsSync(join(workDir, "yarn.lock"));
+  const hasPkgLock = existsSync(join(workDir, "package-lock.json"));
+
+  let installCmd = "npm ci";
+  if (hasPnpm) installCmd = "pnpm install --frozen-lockfile";
+  else if (hasYarn) installCmd = "yarn install";
+  else if (!hasPkgLock) installCmd = "npm install";
+
+  console.info(`[runner] Installing dependencies with: ${installCmd}`);
   try {
-    const pkgPath = join(workDir, "package.json");
-    if (!existsSync(pkgPath)) {
-      console.info("[runner] No package.json found; skipping dependency install.");
-      return;
-    }
+    const out = execSync(installCmd, {
+      cwd: workDir,
+      stdio: "pipe",
+      encoding: "utf8",
+      env: process.env,
+    });
+    if (out) console.info(`[runner] install stdout:\n${out}`);
+    await createLog(taskId, { event: "setup", result: `install:${installCmd}` });
+  } catch (e) {
+    const failure = buildRepoSetupFailure("install", installCmd, e);
+    console.warn("[runner] Dependency install failed:", failure.message);
+    await createLog(taskId, {
+      event: "setup_error",
+      result: failure.message.slice(0, 2000),
+      payload: failure.payload,
+    });
+    throw new RepoSetupError(failure.message);
+  }
 
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-    const hasPnpm = existsSync(join(workDir, "pnpm-lock.yaml"));
-    const hasYarn = existsSync(join(workDir, "yarn.lock"));
-    const hasPkgLock = existsSync(join(workDir, "package-lock.json"));
+  const shouldRunSetupBuild = process.env.FOUNDRY_SETUP_RUN_BUILD?.trim().toLowerCase() === "true";
 
-    let installCmd = "npm ci";
-    if (hasPnpm) installCmd = "pnpm install --frozen-lockfile";
-    else if (hasYarn) installCmd = "yarn install";
-    else if (!hasPkgLock) installCmd = "npm install";
-
-    console.info(`[runner] Installing dependencies with: ${installCmd}`);
+  if (pkg?.scripts?.build && shouldRunSetupBuild) {
+    const buildCmd = hasPnpm ? "pnpm run build" : hasYarn ? "yarn build" : "npm run build";
     try {
-      const out = execSync(installCmd, {
+      console.info(`[runner] Detected build script; running: ${buildCmd}`);
+      const out = execSync(buildCmd, {
         cwd: workDir,
         stdio: "pipe",
         encoding: "utf8",
         env: process.env,
       });
-      if (out) console.info(`[runner] install stdout:\n${out}`);
-      await createLog(taskId, { event: "setup", result: `install:${installCmd}` });
+      if (out) console.info(`[runner] build stdout:\n${out}`);
+      await createLog(taskId, { event: "setup", result: `build:${buildCmd}` });
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      console.warn("[runner] Dependency install failed:", message);
-      await createLog(taskId, { event: "setup_error", result: message.slice(0, 2000) });
-    }
-
-    const shouldRunSetupBuild = process.env.FOUNDRY_SETUP_RUN_BUILD?.trim().toLowerCase() === "true";
-
-    if (pkg?.scripts?.build && shouldRunSetupBuild) {
-      try {
-        const buildCmd = hasPnpm ? "pnpm run build" : hasYarn ? "yarn build" : "npm run build";
-        console.info(`[runner] Detected build script; running: ${buildCmd}`);
-        const out = execSync(buildCmd, {
-          cwd: workDir,
-          stdio: "pipe",
-          encoding: "utf8",
-          env: process.env,
-        });
-        if (out) console.info(`[runner] build stdout:\n${out}`);
-        await createLog(taskId, { event: "setup", result: `build:${buildCmd}` });
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        console.warn("[runner] Build failed:", message);
-        await createLog(taskId, { event: "setup_error", result: message.slice(0, 2000) });
-      }
-    } else if (pkg?.scripts?.build) {
-      console.info(
-        "[runner] Skipping automatic setup build. Set FOUNDRY_SETUP_RUN_BUILD=true to enable it.",
-      );
+      const failure = buildRepoSetupFailure("build", buildCmd, e);
+      console.warn("[runner] Build failed:", failure.message);
       await createLog(taskId, {
-        event: "setup",
-        result: "build:skipped (set FOUNDRY_SETUP_RUN_BUILD=true to enable)",
+        event: "setup_error",
+        result: failure.message.slice(0, 2000),
+        payload: failure.payload,
       });
+      throw new RepoSetupError(failure.message);
     }
-  } catch (e) {
-    console.warn(
-      "[runner] Repository setup step failed:",
-      e instanceof Error ? e.message : String(e),
+  } else if (pkg?.scripts?.build) {
+    console.info(
+      "[runner] Skipping automatic setup build. Set FOUNDRY_SETUP_RUN_BUILD=true to enable it.",
     );
+    await createLog(taskId, {
+      event: "setup",
+      result: "build:skipped (set FOUNDRY_SETUP_RUN_BUILD=true to enable)",
+    });
   }
+}
+
+function buildRepoSetupFailure(
+  step: "install" | "build",
+  command: string,
+  error: unknown,
+): {
+  message: string;
+  payload: {
+    step: string;
+    command: string;
+    stderr: string | null;
+    stdout: string | null;
+    errorMessage: string;
+  };
+} {
+  const details = extractCommandFailureDetails(error);
+  const detailText = [details.stderr, details.stdout, details.message]
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, 1200);
+
+  const message =
+    `Project repository bootstrap failed during ${step}. ` +
+    `The cloned repo must be able to run \`${command}\` successfully in a fresh workspace without manual repair by the worker. ` +
+    `Fix the project repo's install/bootstrap scripts, environment requirements, or runtime prerequisites, then retry.` +
+    (detailText ? `\n\nCommand output:\n${detailText}` : "");
+
+  return {
+    message,
+    payload: {
+      step,
+      command,
+      stderr: details.stderr?.slice(0, 2000) ?? null,
+      stdout: details.stdout?.slice(0, 2000) ?? null,
+      errorMessage: details.message.slice(0, 500),
+    },
+  };
+}
+
+function extractCommandFailureDetails(error: unknown): {
+  message: string;
+  stdout?: string;
+  stderr?: string;
+} {
+  if (!(error instanceof Error)) {
+    return { message: String(error) };
+  }
+
+  const withStreams = error as Error & { stdout?: unknown; stderr?: unknown };
+
+  return {
+    message: error.message,
+    stdout: typeof withStreams.stdout === "string" ? withStreams.stdout : undefined,
+    stderr: typeof withStreams.stderr === "string" ? withStreams.stderr : undefined,
+  };
 }
 
 async function injectSecrets(taskId: string, repoUrl: string, workDir: string): Promise<void> {
@@ -490,6 +589,7 @@ async function applyOrchestrationResult(
     branchName: string;
     prUrl?: string;
     rawContent: string;
+    activity?: ActivityEmitter;
   },
 ): Promise<ProcessTaskOutcome> {
   await createLog(taskId, {
@@ -498,14 +598,15 @@ async function applyOrchestrationResult(
     result: response.classification.reason.slice(0, 2000),
     payload: response.classification,
   });
+  if (context.activity) {
+    void context.activity.emitPhaseChange("Classification complete", { scenario: response.scenario });
+  }
 
   const planApprovalStatus = planApprovalStatusForScenario(response.scenario, response.action);
   const updateData = {
     scenario: TaskScenario[response.scenario],
-    phase: TaskPhase[response.phase],
+    phase: TaskPhase[phaseFromAction(response.action)],
     classificationReason: response.classification.reason,
-    riskLevel: response.classification.riskLevel,
-    estimatedTracks: response.classification.estimatedTracks,
     planApprovalStatus: PlanApprovalStatus[planApprovalStatus],
     planContent: response.plan ? JSON.parse(JSON.stringify(response.plan)) : undefined,
     result: response.finalSummary,
@@ -525,12 +626,13 @@ async function applyOrchestrationResult(
           ? TaskPhase.PLAN_DRAFT
           : response.scenario === "MEDIUM"
             ? TaskPhase.PLAN
-            : response.phase === "PLAN_DRAFT"
-              ? TaskPhase.PLAN_DRAFT
-              : undefined,
+            : undefined,
       result: response.plan.summary.slice(0, 2000),
       payload: response.plan,
     });
+    if (context.activity) {
+      void context.activity.emitPlanGenerated(response.plan.summary, response.plan.steps?.length);
+    }
   }
 
   if (response.action === "AWAIT_PLAN_APPROVAL") {
@@ -557,6 +659,9 @@ async function applyOrchestrationResult(
   }
 
   if (response.action === "FAIL") {
+    if (context.activity) {
+      void context.activity.emitError(response.finalSummary);
+    }
     await prisma.task.update({
       where: { id: taskId },
       data: {
@@ -589,6 +694,9 @@ async function applyOrchestrationResult(
       result: response.review.summary.slice(0, 2000),
       payload: response.review,
     });
+    if (context.activity) {
+      void context.activity.emitReviewCompleted(response.review.verdict, response.review.summary);
+    }
   }
 
   await prisma.task.update({
@@ -609,9 +717,26 @@ async function applyOrchestrationResult(
 async function persistSessionEvent(
   taskId: string,
   event: { type: string; data?: Record<string, unknown> },
+  promptUsage?: PromptUsage,
+  activity?: ActivityEmitter,
 ): Promise<void> {
   try {
     console.info("[runner][session.event]", event.type, event.data ?? {});
+
+    if (event.type === "subagent.started" && promptUsage) {
+      promptUsage.subagentStarts += 1;
+    }
+    if (event.type === "subagent.started" && activity && typeof event.data?.agentName === "string") {
+      void activity.emitSubagentStarted(event.data.agentName);
+    }
+
+    if (event.type === "subagent.completed" && activity && typeof event.data?.agentName === "string") {
+      void activity.emitSubagentCompleted(event.data.agentName);
+    }
+
+    if (event.type === "assistant.usage" && promptUsage) {
+      promptUsage.assistantUsageEvents += 1;
+    }
 
     await createLog(taskId, {
       event: event.type,
@@ -1002,6 +1127,14 @@ function createExecutionEvidence(): ExecutionEvidence {
   };
 }
 
+function createPromptUsage(): PromptUsage {
+  return {
+    topLevelPromptsSent: 0,
+    subagentStarts: 0,
+    assistantUsageEvents: 0,
+  };
+}
+
 async function executeTaskWithGuards(params: {
   session: {
     sendAndWait: (options: { prompt: string }, timeoutMs?: number) => Promise<any>;
@@ -1011,15 +1144,39 @@ async function executeTaskWithGuards(params: {
   project: Project;
   prompt: string;
   evidence: ExecutionEvidence;
+  promptUsage: PromptUsage;
   workDir: string;
 }): Promise<{
   parsed: OrchestratorResponse;
   resultContent: string;
   evidenceFailureReason?: string;
 }> {
+  params.promptUsage.topLevelPromptsSent += 1;
+  await createLog(params.task.id, {
+    event: "prompt.sent",
+    phase: TaskPhase.CLASSIFY,
+    result: "Top-level orchestrator prompt sent",
+    payload: {
+      topLevelPromptsSent: params.promptUsage.topLevelPromptsSent,
+      promptLength: params.prompt.length,
+    },
+  });
+
   const response = await sendAndWaitWithSlidingTimeout(params.session, params.prompt, params.task.id);
   const resultContent = response?.data?.content ?? "No response content";
   let parsed: OrchestratorResponse;
+
+  await createLog(params.task.id, {
+    event: "prompt.usage",
+    result: "Prompt usage summary",
+    payload: {
+      topLevelPromptsSent: params.promptUsage.topLevelPromptsSent,
+      subagentStarts: params.promptUsage.subagentStarts,
+      assistantUsageEvents: params.promptUsage.assistantUsageEvents,
+      estimatedTotalPrompts:
+        params.promptUsage.topLevelPromptsSent + params.promptUsage.subagentStarts,
+    },
+  });
 
   try {
     parsed = parseOrchestratorResponse(resultContent);
@@ -1103,6 +1260,10 @@ function getImplementationEvidenceFailure(params: {
     return null;
   }
 
+  if (evidence.totalToolCalls === 0) {
+    return "The agent returned COMPLETE without using any tools to inspect, modify, validate, or review the repository.";
+  }
+
   if (!hasGitChanges && !hasEditTools && filesChanged.length === 0) {
     return "The agent returned COMPLETE without editing files, producing a git diff, or listing changed files.";
   }
@@ -1123,8 +1284,7 @@ function getFailureEvidenceFailure(params: {
   evidence: ExecutionEvidence;
 }): string | null {
   const { parsed, evidence } = params;
-  const blockers = parsed.implementation?.blockers?.filter(Boolean) ?? [];
-  const blockerText = `${parsed.finalSummary}\n${blockers.join("\n")}`.toLowerCase();
+  const blockerText = parsed.finalSummary.toLowerCase();
 
   if (evidence.totalToolCalls === 0) {
     return "The agent returned FAIL without using any tools to gather evidence for the blocker.";

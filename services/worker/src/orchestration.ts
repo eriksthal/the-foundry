@@ -1,127 +1,87 @@
 import { PlanApprovalStatus, TaskPhase, TaskScenario, type Task } from "@the-foundry/db";
 
 export type OrchestrationAction = "COMPLETE" | "AWAIT_PLAN_APPROVAL" | "FAIL";
-export type ReviewVerdict = "APPROVED" | "CHANGES_REQUESTED" | "NOT_RUN";
+export type ReviewVerdict = "APPROVED" | "CHANGES_REQUESTED";
 
 export type PlanStep = {
   id: string;
   title: string;
   files?: string[];
-  acceptanceCriteria?: string;
-  track?: string;
-  status?: "PENDING" | "IN_PROGRESS" | "DONE" | "BLOCKED";
 };
 
 export type OrchestratorResponse = {
   version: 1;
   scenario: keyof typeof TaskScenario;
   action: OrchestrationAction;
-  phase: keyof typeof TaskPhase;
   classification: {
     size: keyof typeof TaskScenario;
     reason: string;
-    riskLevel: string;
-    estimatedTracks: number;
-    needsHumanPlanApproval: boolean;
   };
   plan?: {
     summary: string;
-    risks?: string[];
-    assumptions?: string[];
-    rollback?: string[];
     steps?: PlanStep[];
   };
   implementation?: {
     summary: string;
     filesChanged?: string[];
-    validations?: string[];
-    blockers?: string[];
   };
   review?: {
     verdict: ReviewVerdict;
     summary: string;
-    findings?: Array<{
-      severity: "BLOCKER" | "WARNING" | "SUGGESTION";
-      file?: string;
-      detail: string;
-    }>;
   };
   finalSummary: string;
-  prUrl?: string;
 };
 
 const VALID_SCENARIOS = new Set<keyof typeof TaskScenario>(["SMALL", "MEDIUM", "COMPLEX"]);
 const VALID_ACTIONS = new Set<OrchestrationAction>(["COMPLETE", "AWAIT_PLAN_APPROVAL", "FAIL"]);
-const VALID_PHASES = new Set<keyof typeof TaskPhase>([
-  "CLASSIFY",
-  "PLAN",
-  "PLAN_DRAFT",
-  "WAITING_FOR_PLAN_APPROVAL",
-  "IMPLEMENT",
-  "REVIEW",
-  "REWORK",
-  "CREATE_PR",
-  "DONE",
-  "FAILED",
-]);
 
 export function buildInitialTaskPrompt(task: Task, branchName: string): string {
-  return `${baseInstructions()}
-
-## Execution Context
-- Task ID: ${task.id}
-- Branch to use: ${branchName}
-- Current scenario: unknown
-- Current phase: CLASSIFY
-- Plan approval status: ${task.planApprovalStatus}
-
-## Task
+  return `## Task
 Title: ${task.title}
 
 Description:
 ${task.description}
 
-## What to do
-1. Classify the task as SMALL, MEDIUM, or COMPLEX using the repository context.
-2. Follow the scenario workflow deterministically:
-   - SMALL: skip planner unless hidden risk is discovered, then implement, review, rework if needed, create PR, finish.
-   - MEDIUM: produce an executable plan, then implement, review, rework if needed, create PR, finish.
-   - COMPLEX: produce a full plan package and STOP after planning with action AWAIT_PLAN_APPROVAL.
-   - MEDIUM must continue automatically without asking for approval.
-3. Never ask follow-up questions. Pick the safest reasonable assumption, record it, and continue.
-4. Use subagents intentionally. The planner returns plans, implementers write code, reviewers gate quality.
-   - Prefer delegating bounded research, implementation, and review work instead of carrying every detail in your own context.
-   - Keep your own context lean: read only what you need, summarize subagent results, and avoid reloading large code sections unless necessary.
-5. The worker handles push and PR creation after execution. Only include prUrl if you obtained a verified real URL from a tool result. Never invent or guess it.
-6. You may return COMPLETE only after real repository work has happened and implementation.filesChanged lists the actual changed files.
-7. Do not invent new action names or state values. Use only the exact contract values listed below.
-8. Return only the required JSON payload.`;
+## Context
+- Branch: ${branchName}
+- Task ID: ${task.id}
+- Plan approval status: ${task.planApprovalStatus}
+
+## Workflow
+1. Read enough of the repository to classify the task as SMALL, MEDIUM, or COMPLEX.
+2. If COMPLEX: delegate to planner for a full plan, then STOP with action AWAIT_PLAN_APPROVAL.
+3. If MEDIUM: delegate to planner for a brief plan, then continue to implementation.
+4. If SMALL: proceed directly to implementation.
+5. Delegate implementation to the implementer subagent with clear scope and acceptance criteria. The implementer must run format, lint, typecheck, and tests before returning.
+6. Delegate review to the reviewer subagent. The reviewer must verify that format, lint, typecheck, and tests all pass — any CI failure is a BLOCKER.
+7. If the reviewer requests changes, delegate fixes to the implementer and review again.
+8. When review passes with APPROVED verdict, return your response.
+
+${baseInstructions()}`;
 }
 
 export function buildResumePrompt(task: Task): string {
   const planJson = task.planContent ? JSON.stringify(task.planContent, null, 2) : "{}";
 
-  return `${baseInstructions()}
-
-## Resume Context
+  return `## Resume Context
 - Task ID: ${task.id}
 - Branch: ${task.branch ?? "unknown"}
-- Current scenario: ${task.scenario ?? "unknown"}
-- Current phase: ${task.phase ?? "unknown"}
-- Plan approval status: ${task.planApprovalStatus}
+- Scenario: ${task.scenario ?? "unknown"}
 
-The plan has now been approved. Resume execution from implementation using the approved plan below. Do not re-classify unless the plan is clearly inconsistent with the repository.
+The plan has been approved. Resume from implementation.
 
 ## Approved Plan
 \`\`\`json
 ${planJson}
 \`\`\`
 
-## Resume instructions
-1. Continue from IMPLEMENT.
-2. Preserve continuity with the previously approved plan.
-3. Run reviewer gating before finalizing.
-4. Return only the required JSON payload.`;
+## Instructions
+1. Implement the approved plan using implementer subagents.
+2. Review with the reviewer subagent.
+3. If the reviewer requests changes, delegate fixes to the implementer and review again.
+4. Return your response.
+
+${baseInstructions()}`;
 }
 
 export function parseOrchestratorResponse(content: string): OrchestratorResponse {
@@ -129,7 +89,7 @@ export function parseOrchestratorResponse(content: string): OrchestratorResponse
   const raw = jsonBlockMatch?.[1] ?? content;
   const parsed = JSON.parse(raw.trim()) as Partial<OrchestratorResponse>;
 
-  if (!parsed.scenario || !parsed.action || !parsed.phase || !parsed.classification || !parsed.finalSummary) {
+  if (!parsed.scenario || !parsed.action || !parsed.classification || !parsed.finalSummary) {
     throw new Error("Orchestrator response missing required fields");
   }
 
@@ -141,27 +101,22 @@ export function parseOrchestratorResponse(content: string): OrchestratorResponse
     throw new Error(`Invalid orchestrator action: ${String(parsed.action)}`);
   }
 
-  if (!VALID_PHASES.has(parsed.phase)) {
-    throw new Error(`Invalid orchestrator phase: ${String(parsed.phase)}`);
+  if (parsed.review?.verdict && !["APPROVED", "CHANGES_REQUESTED"].includes(parsed.review.verdict as string)) {
+    throw new Error(`Invalid review verdict: ${String(parsed.review.verdict)}`);
   }
 
   return {
     version: 1,
     scenario: parsed.scenario,
     action: parsed.action,
-    phase: parsed.phase,
     classification: {
       size: parsed.classification.size ?? parsed.scenario,
       reason: parsed.classification.reason ?? "No classification reason provided",
-      riskLevel: parsed.classification.riskLevel ?? "unknown",
-      estimatedTracks: parsed.classification.estimatedTracks ?? 1,
-      needsHumanPlanApproval: Boolean(parsed.classification.needsHumanPlanApproval),
     },
     plan: parsed.plan,
     implementation: parsed.implementation,
     review: parsed.review,
     finalSummary: parsed.finalSummary,
-    prUrl: parsed.prUrl,
   };
 }
 
@@ -173,81 +128,52 @@ export function planApprovalStatusForScenario(
   return "NOT_REQUIRED";
 }
 
+export function phaseFromAction(action: OrchestrationAction): keyof typeof TaskPhase {
+  switch (action) {
+    case "COMPLETE": return "DONE";
+    case "AWAIT_PLAN_APPROVAL": return "WAITING_FOR_PLAN_APPROVAL";
+    case "FAIL": return "FAILED";
+  }
+}
+
 function baseInstructions(): string {
-  return `You are the primary task agent for The Foundry. You own the task end-to-end and must act as a deterministic state machine.
+  return `## MANDATORY: Work before responding
+You MUST delegate to at least one subagent (implementer) AND have the reviewer approve
+BEFORE returning your JSON response. A response without prior tool usage and subagent
+delegation will be automatically rejected and the task will fail.
 
-## Hard rules
-- Never ask the user for clarification.
-- Never return prose outside the JSON response.
-- Always emit exactly one JSON object inside a \`\`\`json fenced block.
-- Always include: version, scenario, action, phase, classification, finalSummary.
+## Rules
+- COMPLETE requires actual file changes in the repository (verified by git diff).
+- FAIL requires tool-verified evidence of a concrete blocker.
+- Only COMPLEX tasks may use AWAIT_PLAN_APPROVAL.
+- SMALL and MEDIUM tasks must reach completion in this session. Do not stop after investigation or planning.
+- Never ask for clarification. Make safe assumptions and proceed.
+- Return exactly one JSON object in a \`\`\`json fenced block. No other text.
 - Never fabricate repository, branch, commit, or pull request URLs.
-- Never return COMPLETE if no files were changed.
-- Never return FAIL without concrete evidence for the blocker.
-- If you claim a command, runtime, build, lint, or test blocker, you must have actually run the relevant command first.
-- Only COMPLEX tasks may return AWAIT_PLAN_APPROVAL.
-- Never invent intermediate actions such as PLAN. Planning is represented by the phase field, not the action field.
-- SMALL and MEDIUM tasks must be driven to completion in this single top-level run.
-- COMPLEX tasks must stop after planning and wait for approval before implementation.
-- You may delegate to specialist subagents such as planner, implementer, and reviewer when helpful, but you remain responsible for the final result.
-- Keep your own context window clean. Do not try to personally hold every detail of the repository in memory when a subagent can explore, implement, or review a bounded slice and report back.
-- Prefer short summaries of delegated work over copying large raw outputs back into your own context.
-- Scenario values: SMALL | MEDIUM | COMPLEX.
-- Action values:
-  - COMPLETE: task execution finished successfully.
-  - AWAIT_PLAN_APPROVAL: stop after planning and wait for human approval.
-  - FAIL: stop because the task cannot continue safely.
-- Phase values: CLASSIFY | PLAN | PLAN_DRAFT | WAITING_FOR_PLAN_APPROVAL | IMPLEMENT | REVIEW | REWORK | CREATE_PR | DONE | FAILED.
 
-## Output schema
+## Response format
 \`\`\`json
 {
   "version": 1,
-  "scenario": "SMALL|MEDIUM|COMPLEX",
-  "action": "COMPLETE|AWAIT_PLAN_APPROVAL|FAIL",
-  "phase": "CLASSIFY|PLAN|PLAN_DRAFT|WAITING_FOR_PLAN_APPROVAL|IMPLEMENT|REVIEW|REWORK|CREATE_PR|DONE|FAILED",
+  "scenario": "SMALL | MEDIUM | COMPLEX",
+  "action": "COMPLETE | AWAIT_PLAN_APPROVAL | FAIL",
   "classification": {
-    "size": "SMALL|MEDIUM|COMPLEX",
-    "reason": "why this scenario was chosen",
-    "riskLevel": "low|medium|high",
-    "estimatedTracks": 1,
-    "needsHumanPlanApproval": false
+    "size": "SMALL | MEDIUM | COMPLEX",
+    "reason": "one sentence"
   },
   "plan": {
-    "summary": "plan summary",
-    "risks": ["optional"],
-    "assumptions": ["optional"],
-    "rollback": ["optional"],
-    "steps": [
-      {
-        "id": "step-1",
-        "title": "step title",
-        "files": ["optional"],
-        "acceptanceCriteria": "optional",
-        "track": "optional",
-        "status": "PENDING|IN_PROGRESS|DONE|BLOCKED"
-      }
-    ]
+    "summary": "what will be / was done",
+    "steps": [{ "id": "1", "title": "step title", "files": ["path/to/file.ts"] }]
   },
   "implementation": {
     "summary": "what was implemented",
-    "filesChanged": ["optional"],
-    "validations": ["optional"],
-    "blockers": ["optional"]
+    "filesChanged": ["path/to/file.ts"]
   },
   "review": {
-    "verdict": "APPROVED|CHANGES_REQUESTED|NOT_RUN",
-    "summary": "review result",
-    "findings": [
-      {
-        "severity": "BLOCKER|WARNING|SUGGESTION",
-        "file": "optional",
-        "detail": "issue details"
-      }
-    ]
+    "verdict": "APPROVED | CHANGES_REQUESTED",
+    "summary": "review outcome"
   },
-  "finalSummary": "human readable outcome",
-  "prUrl": "optional"
+  "finalSummary": "human-readable outcome"
 }
 \`\`\``;
 }

@@ -16,8 +16,7 @@ Process
 2. Research — map every file and pattern relevant to the feature. Read schemas, types, similar features, and tests.
 3. Identify decisions — if any non-obvious technical choice exists, write an ADR section.
 4. Break into atomic steps — each step must be executable by an implementer agent with only the plan + codebase access. Include package, files, and a single acceptance criterion per step.
-5. Design parallelization — group independent steps into max 3 concurrent tracks. Define merge gates.
-6. Output a structured plan with: summary, assumptions, risks, rollback notes, and step list.
+5. Output a structured plan with: summary and step list.
 
 Quality Checklist
 - Every step names specific files.

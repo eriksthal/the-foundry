@@ -10,6 +10,7 @@ import {
 
 import { requireUser } from "../../../lib/auth";
 import { getPullRequestState } from "../../../lib/github";
+import ActivityFeed from "./ActivityFeed";
 
 export const dynamic = "force-dynamic";
 
@@ -31,14 +32,20 @@ export default async function TaskDetailPage({
   const { id } = await params;
   await requireUser(`/tasks/${id}`);
 
-  const task = await prisma.task.findUnique({
-    where: { id },
-    include: {
-      project: true,
-      logs: { orderBy: { timestamp: "asc" } },
-      feedback: { orderBy: { createdAt: "desc" } },
-    },
-  });
+  const [task, activities] = await Promise.all([
+    prisma.task.findUnique({
+      where: { id },
+      include: {
+        project: true,
+        logs: { orderBy: { timestamp: "asc" } },
+        feedback: { orderBy: { createdAt: "desc" } },
+      },
+    }),
+    prisma.taskActivity.findMany({
+      where: { taskId: id },
+      orderBy: { createdAt: "asc" },
+    }),
+  ]);
 
   if (!task) notFound();
 
@@ -130,19 +137,13 @@ export default async function TaskDetailPage({
         <InfoCard label="Scenario" value={task.scenario ?? "Unclassified"} />
         <InfoCard label="Phase" value={task.phase ?? "Not started"} />
         <InfoCard label="Plan Approval" value={task.planApprovalStatus} />
-        <InfoCard
-          label="Tracks"
-          value={typeof task.estimatedTracks === "number" ? String(task.estimatedTracks) : "n/a"}
-        />
+        <InfoCard label="Model" value={task.model} />
       </div>
 
       {task.classificationReason && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-5">
           <h2 className="mb-2 text-sm font-semibold text-zinc-400">Classification</h2>
           <p className="text-sm text-zinc-200">{task.classificationReason}</p>
-          {task.riskLevel && (
-            <p className="mt-2 text-xs text-zinc-500">Risk level: {task.riskLevel}</p>
-          )}
         </div>
       )}
 
@@ -255,6 +256,17 @@ export default async function TaskDetailPage({
           <InfoCard key={item.label} label={item.label} value={item.value} />
         ))}
       </div>
+
+      {(activities.length > 0 || task.status === "IN_PROGRESS") && (
+        <ActivityFeed
+          taskId={id}
+          taskStatus={task.status}
+          initialActivities={activities.map((a) => ({
+            ...a,
+            createdAt: a.createdAt.toISOString(),
+          }))}
+        />
+      )}
 
       {timelineLogs.length > 0 && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-5">

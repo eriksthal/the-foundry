@@ -23,8 +23,6 @@ export async function PATCH(
     scenario?: TaskScenario;
     phase?: TaskPhase;
     classificationReason?: string;
-    riskLevel?: string;
-    estimatedTracks?: number;
     planApprovalStatus?: PlanApprovalStatus;
     planContent?: unknown;
     copilotSessionId?: string;
@@ -42,8 +40,6 @@ export async function PATCH(
   if (body.scenario) data.scenario = body.scenario;
   if (body.phase) data.phase = body.phase;
   if (body.classificationReason) data.classificationReason = body.classificationReason;
-  if (body.riskLevel) data.riskLevel = body.riskLevel;
-  if (typeof body.estimatedTracks === "number") data.estimatedTracks = body.estimatedTracks;
   if (body.planApprovalStatus) data.planApprovalStatus = body.planApprovalStatus;
   if (body.planContent) data.planContent = JSON.parse(JSON.stringify(body.planContent));
   if (body.copilotSessionId) data.copilotSessionId = body.copilotSessionId;

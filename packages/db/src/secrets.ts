@@ -9,7 +9,7 @@
  */
 import crypto from 'node:crypto';
 import { PrismaClient } from "@prisma/client";
-import { prisma } from '.';
+import { prisma } from "./index.ts";
 
 
 // NOTE: FOUNDRY_SECRETS_KEY must be set in the environment. In local dev, ensure dotenv.config() is called in the API route or entrypoint before using this module.
